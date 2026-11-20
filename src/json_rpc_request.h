@@ -39,7 +39,7 @@ typedef Callback<void, const CallbackData& /*data*/>::Base CallbackBase;
 // style (POST to "/json_rpc", digest authentication).
 static constexpr char BITCOIN_AUTH_PREFIX[] = "basic:";
 static constexpr size_t BITCOIN_AUTH_PREFIX_LEN = sizeof(BITCOIN_AUTH_PREFIX) - 1;
-FORCEINLINE bool is_bitcoin_auth(const std::string& auth) { return auth.compare(0, BITCOIN_AUTH_PREFIX_LEN, BITCOIN_AUTH_PREFIX) == 0; }
+inline bool is_bitcoin_auth(const std::string& auth) { return auth.compare(0, BITCOIN_AUTH_PREFIX_LEN, BITCOIN_AUTH_PREFIX) == 0; }
 
 FORCEINLINE static constexpr void dummy_callback(const CallbackData& /*data*/) {}
 

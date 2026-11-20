@@ -124,6 +124,7 @@ struct CurlContext : public nocopy_nomove
 
 	std::string m_proxy;
 	std::string m_auth;
+	bool m_bitcoinStyle = false; // PQCH: pqchd (Bitcoin Core RPC) request
 };
 
 CurlContext::CurlContext(const std::string& address, int port, const std::string& req, const std::string& auth, const std::string& proxy, bool ssl, const std::string& ssl_fingerprint, CallbackBase* cb, CallbackBase* close_cb, uv_loop_t* loop)
@@ -248,6 +249,7 @@ CurlContext::CurlContext(const std::string& address, int port, const std::string
 
 	if (is_bitcoin_auth(auth)) {
 		// PQCH: pqchd uses HTTP basic authentication (user:password or the cookie file's __cookie__:<password>)
+		m_bitcoinStyle = true;
 		m_auth = auth.substr(BITCOIN_AUTH_PREFIX_LEN);
 		curl_easy_setopt_checked(m_handle, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
 		curl_easy_setopt_checked(m_handle, CURLOPT_USERPWD, m_auth.c_str());
@@ -573,7 +575,11 @@ void CurlContext::check_multi_info()
 				long http_code = 0;
 				curl_easy_getinfo(message->easy_handle, CURLINFO_RESPONSE_CODE, &http_code);
 
-				if (http_code != 200) {
+				if ((http_code == 500 || http_code == 404) && m_bitcoinStyle && !m_callbackData.m_response.empty()) {
+					// PQCH: pqchd (Bitcoin Core RPC) answers RPC errors with HTTP 500 (404 for an unknown
+					// method) and the JSON error object in the body: hand the body to the caller.
+				}
+				else if (http_code != 200) {
 					char buf[32] = {};
 					log::Stream s(buf);
 					s << "HTTP error " << static_cast<int>(http_code) << '\0';
