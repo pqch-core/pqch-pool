@@ -4,7 +4,7 @@
 # Instala um nó do pool PQCH (pqch-pool) na testnet, ao lado de um pqchd que já esteja a correr na mesma máquina.
 #
 #   sudo deploy/instalar_pool_testnet.sh --user <utilizador do pqchd> --datadir <pasta de dados do pqchd> \
-#        [--wallet <carteira>] [--threads N] [--fast] [--listen] [--peer <ip>:37890]... [--substituir-minerador]
+#        [--wallet <carteira> | --morada <pqct1p...>] [--threads N] [--fast] [--listen] [--peer <ip>:37890]... [--substituir-minerador]
 #
 #   âncora:  sudo deploy/instalar_pool_testnet.sh --user pqch --datadir /home/pqch/.pqch --threads 1 --listen
 #   server:  sudo deploy/instalar_pool_testnet.sh --user pqch-minerador --datadir /var/lib/pqch-minerador \
@@ -12,6 +12,8 @@
 #   máquina só de pool (o minerador direto da testnet passa a ficar parado):
 #            sudo deploy/instalar_pool_testnet.sh --user pqch-minerador --datadir /var/lib/pqch-minerador \
 #                 --threads 4 --fast --peer 187.127.89.83:37890 --substituir-minerador
+#
+# Nó sem carteira (disablewallet=1): indique a morada das recompensas com --morada pqct1p...
 #
 # O que faz, por esta ordem:
 #   1. compila o pqch-pool deste clone (pacotes: cmake, libuv, libzmq, libcurl, nasm) e instala /usr/local/bin/pqch-pool;
@@ -30,12 +32,13 @@ set -euo pipefail
 
 POOL_PORT=37890
 RPC_PORT=39332          # testnet
-NODE_USER=""; DATADIR=""; WALLET=""; THREADS=1; FAST=""; LISTEN=0; PEERS=(); SUBST=0
+NODE_USER=""; DATADIR=""; WALLET=""; MORADA=""; THREADS=1; FAST=""; LISTEN=0; PEERS=(); SUBST=0
 while (( $# )); do
 	case "$1" in
 		--user) NODE_USER=$2; shift 2 ;;
 		--datadir) DATADIR=$2; shift 2 ;;
 		--wallet) WALLET=$2; shift 2 ;;
+		--morada) MORADA=$2; shift 2 ;;
 		--threads) THREADS=$2; shift 2 ;;
 		--fast) FAST="--fast"; shift ;;
 		--listen) LISTEN=1; shift ;;
@@ -93,9 +96,14 @@ echo "== 2/4 Morada e ligação ao pqchd"
 COOKIE=$(find "$DATADIR" -maxdepth 2 -name .cookie -path '*test*' | head -1)
 [[ -n "$COOKIE" ]] || { echo "não encontrei o cookie da testnet em $DATADIR (o pqchd-testnet está a correr?)"; exit 1; }
 install -d -m 0750 -o "$NODE_USER" -g "$NODE_USER" "$STATE"
-if [[ -s "$STATE/morada" ]]; then
+if [[ -n "$MORADA" ]]; then
+	ADDR=$MORADA
+	cli validateaddress "$ADDR" | grep -q '"isvalid": true' || { echo "morada inválida para a testnet: $ADDR"; exit 1; }
+	echo "$ADDR" > "$STATE/morada"; chown "$NODE_USER:$NODE_USER" "$STATE/morada"
+elif [[ -s "$STATE/morada" ]]; then
 	ADDR=$(cat "$STATE/morada")
 else
+	cli listwallets >/dev/null 2>&1 || { echo "este pqchd não tem carteira (disablewallet=1): indique a morada das recompensas com --morada pqct1p..."; exit 1; }
 	[[ -n "$WALLET" ]] || WALLET=$(cli listwallets | python3 -c 'import sys,json; w=json.load(sys.stdin); print(w[0] if w else "")')
 	# Depois de um reinício o pqchd pode não ter a carteira carregada: usa a primeira da pasta de dados.
 	[[ -n "$WALLET" ]] || WALLET=$(cli listwalletdir | python3 -c 'import sys,json; w=json.load(sys.stdin)["wallets"]; print(w[0]["name"] if w else "")')
