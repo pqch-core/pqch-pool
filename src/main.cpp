@@ -22,6 +22,7 @@
 #include "p2p_server.h"
 #include "thread_pool.h"
 #include "pqchd_client.h"
+#include "pqch_pool.h"
 #include <curl/curl.h>
 
 #ifdef WITH_GRPC
@@ -122,6 +123,8 @@ void p2pool_usage()
 		"--no-clearnet-p2p         Forces P2P server to listen on 127.0.0.1 and to not connect to clearnet IPs\n"
 		"--params-file             File name to load parameters from. It can't be used together with any other command line parameters\n"
 		"--pqchd-check host:port cookie|user:password  PQCH: check that the pool can get work from pqchd, then exit\n"
+		"--pqch-pool host:port cookie|user:password addr,addr,...  PQCH (phase A): one pool node, one built-in miner per address\n"
+		"                          [--share-time S] [--min-diff D] [--seconds N] [--log FILE]\n"
 		"--pqchd-mine-test host:port cookie|user:password addr:weight,...  PQCH (regtest): mine one block paying these addresses, then exit\n"
 		"--help                    Show this help message\n\n"
 		"Example command line:\n\n"
@@ -298,6 +301,8 @@ int main(int argc, char* argv[])
 	const char* pqchd_check_host = nullptr;
 	const char* pqchd_check_credentials = nullptr;
 	const char* pqchd_mine_spec = nullptr;
+	bool run_pqch_pool = false;
+	p2pool::pqch::PoolOptions pqch_pool_options;
 
 	for (int i = 1; i < argc; ++i) {
 		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "/help") || !strcmp(argv[i], "-h") || !strcmp(argv[i], "/h") || !strcmp(argv[i], "/?")) {
@@ -316,6 +321,29 @@ int main(int argc, char* argv[])
 
 		if (!strcmp(argv[i], "--params-file") && (i + 1 < argc)) {
 			params_file = argv[++i];
+		}
+
+		if (!strcmp(argv[i], "--pqch-pool") && (i + 3 < argc)) {
+			std::string error;
+			if (!p2pool::parse_pqchd_connection(argv[i + 1], argv[i + 2], pqch_pool_options.pqchd, error)) {
+				fprintf(stderr, "--pqch-pool: %s\n", error.c_str());
+				return 1;
+			}
+			const std::string list = argv[i + 3];
+			for (size_t a = 0, b; a < list.size(); a = b + 1) {
+				b = list.find(',', a);
+				if (b == std::string::npos) b = list.size();
+				if (b > a) pqch_pool_options.miners.push_back(list.substr(a, b - a));
+			}
+			run_pqch_pool = true;
+			i += 3;
+			continue;
+		}
+		if (run_pqch_pool && (i + 1 < argc)) {
+			if (!strcmp(argv[i], "--share-time")) { pqch_pool_options.share_time = strtoull(argv[++i], nullptr, 10); continue; }
+			if (!strcmp(argv[i], "--min-diff")) { pqch_pool_options.min_difficulty = strtoull(argv[++i], nullptr, 10); continue; }
+			if (!strcmp(argv[i], "--seconds")) { pqch_pool_options.seconds = strtoull(argv[++i], nullptr, 10); continue; }
+			if (!strcmp(argv[i], "--log")) { pqch_pool_options.log_file = argv[++i]; continue; }
 		}
 
 		if (!strcmp(argv[i], "--pqchd-mine-test") && (i + 3 < argc)) {
@@ -354,6 +382,23 @@ int main(int argc, char* argv[])
 	// Some P2Pool code will not work without libuv initialized, so the code above this line must be minimal
 	p2pool::init_uv();
 	p2pool::thread_pool_init();
+
+	// PQCH phase A: one pool node with built-in miners
+	if (run_pqch_pool) {
+		if ((pqch_pool_options.share_time == 0) || (pqch_pool_options.min_difficulty == 0)) {
+			fprintf(stderr, "--share-time and --min-diff must be at least 1\n");
+			return 1;
+		}
+		if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
+			fprintf(stderr, "curl_global_init failed\n");
+			return 1;
+		}
+		result = p2pool::pqch::run_pool(pqch_pool_options);
+		curl_global_cleanup();
+		p2pool::thread_pool_destroy();
+		uv_loop_close(uv_default_loop());
+		return result;
+	}
 
 	// PQCH: check the connection to pqchd and exit
 	if (pqchd_check_host) {

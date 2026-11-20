@@ -7,11 +7,11 @@ There is no operator and no account: the pool nodes keep a chain of shares among
 PQCH block found by the pool pays all miners of the PPLNS window directly in its coinbase, one P2MR
 output each.
 
-Status: **phase A in progress** (see `contrib/pqch/POOL.md` in the PQCH Core repository).
+Status: **phase A done** (20 Nov 2026): one pool node on regtest finds PQCH blocks whose coinbases pay the share chain's PPLNS split. See `contrib/pqch/POOL.md` in the PQCH Core repository for the plan.
 
 | Phase | What | Status |
 | --- | --- | --- |
-| A | Fork, main chain: block template, coinbase, proof of work and block submission with `pqchd`; one pool node in regtest | in progress |
+| A | Fork, main chain: block template, coinbase, proof of work and block submission with `pqchd`; one pool node in regtest | **done** |
 | B | Pool network: share chain between nodes, PPLNS, PQCH parameters | planned |
 | C | Miner with stratum | planned |
 | D | One-click application (Windows, Linux) | planned |
@@ -37,5 +37,33 @@ git -C external/src/grpc submodule update --init --depth 1 third_party/boringssl
 cmake -B build -DWITH_GRPC=OFF -DWITH_MERGE_MINING_DONATION=OFF -DWITH_UPNP=OFF
 cmake --build build -j
 ```
+
+## Phase A: what exists
+
+| Piece | Where |
+| --- | --- |
+| Connection to `pqchd` (`getblocktemplate` every second, `submitblock`, cookie or user/password) | `src/pqchd.*`, `src/pqchd_client.*` |
+| P2MR addresses, PPLNS split, coinbase, merkle root, 80-byte header, block | `src/pqch_block.*` |
+| RandomX v2 proof of work (checked against the official vectors, as `pqchd`) | `src/pqch_pow.*` |
+| Share chain: share ids committed in the coinbase, PPLNS window of 2,160 shares, share difficulty for one share per 10 s | `src/pqch_sidechain.*` |
+| One pool node with built-in miners | `src/pqch_pool.cpp` |
+
+The share chain is PQCH's own, with P2Pool's rules: P2Pool's `side_chain.cpp` is built around Monero's
+transaction format (one-time keys, derived outputs, merge-mining proofs). P2Pool's networking, stratum server
+and the rest are reused in phases B and C.
+
+Commands (development):
+
+```
+p2pool --pqchd-check 127.0.0.1:<rpcport> <datadir>/<network>/.cookie        # can the pool work with this node?
+p2pool --pqch-pool 127.0.0.1:<rpcport> <cookie> <P2MR address>,<P2MR address> \
+       [--share-time 10] [--min-diff 100000] [--seconds 60] [--log pqch-pool.jsonl]
+```
+
+Acceptance tests against a real `pqchd` (also in CI, job "Pool against pqchd"):
+`tests/pqch/regtest_mine.sh` and `tests/pqch/regtest_pool.sh` (the second one checks, independently of the
+pool's code, that every coinbase on chain equals the PPLNS split of the share chain). On regtest the main
+difficulty is minimal, so every share is also a block; shares that are not blocks are covered by the unit tests
+and by the testnet in phase B.
 
 The original P2Pool README follows in `README.md`.

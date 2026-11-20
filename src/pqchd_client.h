@@ -55,6 +55,9 @@ public:
 	bool start(uv_loop_t* loop);
 	void stop();
 
+	// Ask for a template now (e.g. right after this pool found a block), not at the next tick.
+	void poll_now() { poll(); }
+
 	// Submit a serialized block (header + transactions, with witness). The callback runs on the loop thread.
 	void submit_block(std::vector<uint8_t>&& block, SubmitCallback cb);
 
@@ -83,6 +86,9 @@ private:
 	// RPC callbacks hold this flag and do nothing once the client is gone (a request may still be in flight).
 	std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
 };
+
+// "host:port" and "cookie file" or "user:password" -> client configuration.
+bool parse_pqchd_connection(const char* host_port, const char* credentials, PqchdClient::Config& config, std::string& error);
 
 // `pqch-pool --pqchd-check <host:port> <cookie file | user:password>`: connect to pqchd, print the first
 // block template and exit (0 = the pool can work with this node).

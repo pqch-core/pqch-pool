@@ -44,3 +44,50 @@ jobs:
           cd build
           # pool_block.verify needs Monero share data that is not in the repository; it is replaced in phase A.
           ./p2pool_tests --gtest_filter='-pool_block.verify'
+
+  regtest:
+    # Phase A acceptance: the pool against a real pqchd (built from pqch-core/pqch main) on regtest.
+    name: Pool against pqchd (regtest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pqch-core/pqch
+          ref: main
+          path: pqch
+          persist-credentials: false
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake pkgconf python3 libevent-dev \
+            libboost-dev libsqlite3-dev ccache libuv1-dev libzmq3-dev libcurl4-openssl-dev nasm
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ccache-pqchd-${{ hashFiles('pqch/src/**') }}
+          restore-keys: ccache-pqchd-
+      - name: Build pqchd and pqch-cli
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 500M
+        run: |
+          cmake -S pqch -B pqch/build -DENABLE_WALLET=ON -DENABLE_IPC=OFF -DBUILD_GUI=OFF -DBUILD_TESTS=OFF \
+            -DBUILD_BENCH=OFF -DBUILD_FUZZ_BINARY=OFF -DWITH_CCACHE=ON
+          cmake --build pqch/build -j"$(nproc)" --target bitcoind bitcoin-cli
+      - name: Build the pool
+        run: |
+          git submodule update --init --depth 1 external/src/RandomX external/src/cppzmq external/src/libuv \
+            external/src/libzmq external/src/rapidjson external/src/robin-hood-hashing external/src/curl \
+            external/src/miniupnp
+          git submodule update --init --depth 1 external/src/grpc
+          git -C external/src/grpc submodule update --init --depth 1 third_party/boringssl-with-bazel
+          cmake -B build -DWITH_GRPC=OFF -DWITH_MERGE_MINING_DONATION=OFF -DWITH_UPNP=OFF -DWITH_LTO=OFF
+          cmake --build build -j"$(nproc)"
+      - name: Blocks built by the pool are accepted by pqchd
+        run: tests/pqch/regtest_mine.sh pqch/build/bin build/p2pool
+      - name: One pool node finds blocks that pay the share chain (phase A criterion)
+        run: tests/pqch/regtest_pool.sh pqch/build/bin build/p2pool 90

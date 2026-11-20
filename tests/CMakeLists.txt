@@ -65,6 +65,7 @@ set(SOURCES
 	src/pqchd_tests.cpp
 	src/pqch_block_tests.cpp
 	src/pqch_pow_tests.cpp
+	src/pqch_sidechain_tests.cpp
 	src/sha256_tests.cpp
 	src/util_tests.cpp
 	src/wallet_tests.cpp
@@ -92,6 +93,7 @@ set(SOURCES
 	../src/pqchd.cpp
 	../src/pqch_block.cpp
 	../src/pqch_pow.cpp
+	../src/pqch_sidechain.cpp
 	../src/side_chain.cpp
 	../src/stratum_server.cpp
 	../src/tcp_server.cpp

@@ -192,6 +192,32 @@ void PqchdClient::submit_block(std::vector<uint8_t>&& block, SubmitCallback cb)
 	(void)alive;
 }
 
+bool parse_pqchd_connection(const char* host_port, const char* credentials, PqchdClient::Config& config, std::string& error)
+{
+	const std::string hp = host_port;
+	const size_t colon = hp.rfind(':');
+	if ((colon == std::string::npos) || (colon == 0)) {
+		error = "expected <host:port>, got \"" + hp + "\"";
+		return false;
+	}
+	config.address = hp.substr(0, colon);
+	config.port = atoi(hp.c_str() + colon + 1);
+	if ((config.port <= 0) || (config.port > 65535)) {
+		error = "invalid port in \"" + hp + "\"";
+		return false;
+	}
+	const std::string cred = credentials;
+	if (!pqchd::read_cookie(cred, config.auth)) {
+		const size_t c = cred.find(':');
+		if ((c == std::string::npos) || (c == 0)) {
+			error = "\"" + cred + "\" is neither a readable cookie file nor user:password";
+			return false;
+		}
+		config.auth = pqchd::make_auth(cred.substr(0, c), cred.substr(c + 1));
+	}
+	return true;
+}
+
 // Build a block from `t` paying the "address:weight,address:weight,..." of `spec` (the first address is the
 // finder), and mine it with RandomX v2 (light mode). For regtest-level difficulty only.
 static bool mine_test_block(const pqchd::Template& t, const char* spec, std::vector<uint8_t>& block, std::string& error)
@@ -275,27 +301,10 @@ static bool mine_test_block(const pqchd::Template& t, const char* spec, std::vec
 static int run_tool(const char* host_port, const char* credentials, const char* mine_spec)
 {
 	PqchdClient::Config config;
-	const std::string hp = host_port;
-	const size_t colon = hp.rfind(':');
-	if ((colon == std::string::npos) || (colon == 0)) {
-		fprintf(stderr, "pqchd: expected <host:port>, got \"%s\"\n", host_port);
+	std::string conn_error;
+	if (!parse_pqchd_connection(host_port, credentials, config, conn_error)) {
+		fprintf(stderr, "pqchd: %s\n", conn_error.c_str());
 		return 1;
-	}
-	config.address = hp.substr(0, colon);
-	config.port = atoi(hp.c_str() + colon + 1);
-	if ((config.port <= 0) || (config.port > 65535)) {
-		fprintf(stderr, "pqchd: invalid port in \"%s\"\n", host_port);
-		return 1;
-	}
-
-	const std::string cred = credentials;
-	if (!pqchd::read_cookie(cred, config.auth)) {
-		const size_t c = cred.find(':');
-		if ((c == std::string::npos) || (c == 0)) {
-			fprintf(stderr, "pqchd: \"%s\" is neither a readable cookie file nor user:password\n", credentials);
-			return 1;
-		}
-		config.auth = pqchd::make_auth(cred.substr(0, c), cred.substr(c + 1));
 	}
 
 	uv_loop_t* loop = uv_default_loop_checked();
