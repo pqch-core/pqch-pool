@@ -22,6 +22,7 @@ DIR=$(mktemp -d)
 trap '"$BIN/pqch-cli" -regtest -datadir="$DIR" -rpcport="$RPC_PORT" stop >/dev/null 2>&1 || true; sleep 2; rm -rf "$DIR"' EXIT
 
 "$BIN/pqchd" -regtest -datadir="$DIR" -daemon -listen=0 -rpcport="$RPC_PORT" -fallbackfee=0.0001 >/dev/null
+for _ in $(seq 1 120); do [ -s "$DIR/regtest/.cookie" ] && break; sleep 0.5; done # -rpcwait does not wait for the cookie file
 cli() { "$BIN/pqch-cli" -regtest -datadir="$DIR" -rpcport="$RPC_PORT" -rpcwait "$@"; }
 cli createwallet w >/dev/null
 cli generatetoaddress 110 "$(cli getnewaddress)" >/dev/null
