@@ -114,6 +114,7 @@ set(HEADERS
 	src/pqchd.h
 	src/pqchd_client.h
 	src/pqch_block.h
+	src/pqch_pow.h
 	src/keccak.h
 	src/log.h
 	src/mempool.h
@@ -153,6 +154,7 @@ set(SOURCES
 	src/pqchd.cpp
 	src/pqchd_client.cpp
 	src/pqch_block.cpp
+	src/pqch_pow.cpp
 	src/keccak.cpp
 	src/log.cpp
 	src/main.cpp

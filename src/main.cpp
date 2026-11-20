@@ -122,6 +122,7 @@ void p2pool_usage()
 		"--no-clearnet-p2p         Forces P2P server to listen on 127.0.0.1 and to not connect to clearnet IPs\n"
 		"--params-file             File name to load parameters from. It can't be used together with any other command line parameters\n"
 		"--pqchd-check host:port cookie|user:password  PQCH: check that the pool can get work from pqchd, then exit\n"
+		"--pqchd-mine-test host:port cookie|user:password addr:weight,...  PQCH (regtest): mine one block paying these addresses, then exit\n"
 		"--help                    Show this help message\n\n"
 		"Example command line:\n\n"
 		"%s --host 127.0.0.1 --rpc-port 18081 --zmq-port 18083 --wallet YOUR_WALLET_ADDRESS --stratum 0.0.0.0:%d --p2p 0.0.0.0:%d\n\n",
@@ -296,6 +297,7 @@ int main(int argc, char* argv[])
 	std::string params_file;
 	const char* pqchd_check_host = nullptr;
 	const char* pqchd_check_credentials = nullptr;
+	const char* pqchd_mine_spec = nullptr;
 
 	for (int i = 1; i < argc; ++i) {
 		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "/help") || !strcmp(argv[i], "-h") || !strcmp(argv[i], "/h") || !strcmp(argv[i], "/?")) {
@@ -314,6 +316,13 @@ int main(int argc, char* argv[])
 
 		if (!strcmp(argv[i], "--params-file") && (i + 1 < argc)) {
 			params_file = argv[++i];
+		}
+
+		if (!strcmp(argv[i], "--pqchd-mine-test") && (i + 3 < argc)) {
+			pqchd_check_host = argv[i + 1];
+			pqchd_check_credentials = argv[i + 2];
+			pqchd_mine_spec = argv[i + 3];
+			i += 3;
 		}
 
 		if (!strcmp(argv[i], "--pqchd-check") && (i + 2 < argc)) {
@@ -352,7 +361,8 @@ int main(int argc, char* argv[])
 			fprintf(stderr, "curl_global_init failed\n");
 			return 1;
 		}
-		result = p2pool::pqchd_check(pqchd_check_host, pqchd_check_credentials);
+		result = pqchd_mine_spec ? p2pool::pqchd_mine_test(pqchd_check_host, pqchd_check_credentials, pqchd_mine_spec)
+		                         : p2pool::pqchd_check(pqchd_check_host, pqchd_check_credentials);
 		curl_global_cleanup();
 		p2pool::thread_pool_destroy();
 		uv_loop_close(uv_default_loop());

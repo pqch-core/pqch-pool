@@ -88,4 +88,9 @@ private:
 // block template and exit (0 = the pool can work with this node).
 int pqchd_check(const char* host_port, const char* credentials);
 
+// `pqch-pool --pqchd-mine-test <host:port> <cookie file | user:password> <address:weight,...>`: build a block
+// from one template, paying the P2MR addresses in proportion to their weights (the first is the finder),
+// mine it with RandomX v2 and submit it (exit 0 = accepted). Regtest-level difficulty only.
+int pqchd_mine_test(const char* host_port, const char* credentials, const char* payout_spec);
+
 } // namespace p2pool

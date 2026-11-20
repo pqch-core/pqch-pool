@@ -18,6 +18,9 @@
 #include "common.h"
 #include "pqchd_client.h"
 #include "json_rpc_request.h"
+#include "pqch_block.h"
+#include "pqch_pow.h"
+#include <algorithm>
 
 LOG_CATEGORY(Pqchd)
 
@@ -189,19 +192,99 @@ void PqchdClient::submit_block(std::vector<uint8_t>&& block, SubmitCallback cb)
 	(void)alive;
 }
 
-int pqchd_check(const char* host_port, const char* credentials)
+// Build a block from `t` paying the "address:weight,address:weight,..." of `spec` (the first address is the
+// finder), and mine it with RandomX v2 (light mode). For regtest-level difficulty only.
+static bool mine_test_block(const pqchd::Template& t, const char* spec, std::vector<uint8_t>& block, std::string& error)
+{
+	std::vector<pqch::PayoutWeight> weights;
+	pqch::Network net = pqch::Network::REGTEST;
+	bool net_known = false;
+
+	std::string list = spec;
+	size_t pos = 0;
+	while (pos <= list.size()) {
+		size_t end = list.find(',', pos);
+		if (end == std::string::npos) end = list.size();
+		const std::string item = list.substr(pos, end - pos);
+		pos = end + 1;
+		if (item.empty()) continue;
+
+		const size_t colon = item.find(':');
+		const std::string address = item.substr(0, colon);
+		const uint64_t weight = (colon == std::string::npos) ? 1 : strtoull(item.c_str() + colon + 1, nullptr, 10);
+
+		std::vector<uint8_t> script;
+		bool ok = false;
+		for (pqch::Network n : { pqch::Network::REGTEST, pqch::Network::TEST, pqch::Network::MAIN }) {
+			if ((!net_known || n == net) && pqch::p2mr_script_from_address(address, n, script)) {
+				net = n;
+				net_known = true;
+				ok = true;
+				break;
+			}
+		}
+		if (!ok || !weight) {
+			error = "not a P2MR address of the same network, or zero weight: " + item;
+			return false;
+		}
+		weights.push_back({ script, weight });
+	}
+	if (weights.empty()) {
+		error = "no addresses";
+		return false;
+	}
+
+	const std::vector<pqch::Payout> payouts = pqch::split_reward(t.coinbase_value, weights, weights[0].script);
+	for (const pqch::Payout& p : payouts) {
+		std::string a;
+		pqch::address_from_p2mr_script(p.script, net, a);
+		printf("  pays %llu quanta to %s\n", static_cast<unsigned long long>(p.value), a.c_str());
+	}
+
+	hash share_id; // the pool puts the share's sidechain id here; any 32 bytes for this test
+	for (size_t i = 0; i < HASH_SIZE; ++i) share_id.h[i] = static_cast<uint8_t>(0xa0 + i);
+
+	pqch::Coinbase cb;
+	if (!pqch::make_coinbase(t, payouts, share_id, 0, cb)) {
+		error = "could not build the coinbase";
+		return false;
+	}
+	std::vector<hash> txids{ cb.txid };
+	for (const auto& tx : t.transactions) txids.push_back(tx.txid);
+	const hash root = pqch::merkle_root(txids);
+
+	pqch::PowHasher hasher;
+	if (!hasher.set_key(t.seed_hash)) {
+		error = "RandomX initialization failed";
+		return false;
+	}
+	uint8_t header[pqch::HEADER_SIZE];
+	const uint32_t time = static_cast<uint32_t>(std::max(t.curtime, t.mintime));
+	for (uint32_t nonce = 0; nonce < 2000000; ++nonce) {
+		pqch::make_header(t, root, time, nonce, header);
+		if (pqch::check_pow(hasher.calculate(header, sizeof(header)), t.target)) {
+			printf("  mined: nonce %u, block %s\n", nonce, hash_to_rpc_hex(pqch::block_hash(header)).c_str());
+			block = pqch::serialize_block(header, cb, t);
+			return true;
+		}
+	}
+	error = "no nonce found (difficulty too high for a test)";
+	return false;
+}
+
+static int run_tool(const char* host_port, const char* credentials, const char* mine_spec)
 {
 	PqchdClient::Config config;
 	const std::string hp = host_port;
 	const size_t colon = hp.rfind(':');
 	if ((colon == std::string::npos) || (colon == 0)) {
-		fprintf(stderr, "--pqchd-check: expected <host:port>, got \"%s\"\n", host_port);
+		fprintf(stderr, "pqchd: expected <host:port>, got \"%s\"\n", host_port);
 		return 1;
 	}
 	config.address = hp.substr(0, colon);
 	config.port = atoi(hp.c_str() + colon + 1);
 	if ((config.port <= 0) || (config.port > 65535)) {
-		fprintf(stderr, "--pqchd-check: invalid port in \"%s\"\n", host_port);
+		fprintf(stderr, "pqchd: invalid port in \"%s\"\n", host_port);
 		return 1;
 	}
 
@@ -209,7 +292,7 @@ int pqchd_check(const char* host_port, const char* credentials)
 	if (!pqchd::read_cookie(cred, config.auth)) {
 		const size_t c = cred.find(':');
 		if ((c == std::string::npos) || (c == 0)) {
-			fprintf(stderr, "--pqchd-check: \"%s\" is neither a readable cookie file nor user:password\n", credentials);
+			fprintf(stderr, "pqchd: \"%s\" is neither a readable cookie file nor user:password\n", credentials);
 			return 1;
 		}
 		config.auth = pqchd::make_auth(cred.substr(0, c), cred.substr(c + 1));
@@ -255,11 +338,31 @@ int pqchd_check(const char* host_port, const char* credentials)
 	client = new PqchdClient(config,
 		[&](const pqchd::Template& t, bool)
 		{
+			if (done) {
+				return;
+			}
 			printf("pqchd OK: height %llu, previous block %s\n", static_cast<unsigned long long>(t.height), hash_to_rpc_hex(t.prev_hash).c_str());
 			printf("  bits %08x, coinbase value %llu quanta, %zu transactions\n", t.bits, static_cast<unsigned long long>(t.coinbase_value), t.transactions.size());
 			printf("  RandomX key (seed height %llu): %s\n", static_cast<unsigned long long>(t.seed_height), hash_to_rpc_hex(t.seed_hash).c_str());
-			result = 0;
-			finish();
+			if (!mine_spec) {
+				result = 0;
+				finish();
+				return;
+			}
+			client->stop(); // one template is enough
+			std::vector<uint8_t> block;
+			std::string error;
+			if (!mine_test_block(t, mine_spec, block, error)) {
+				last_error = "mine test: " + error;
+				finish();
+				return;
+			}
+			client->submit_block(std::move(block), [&](bool accepted, const std::string& reason) {
+				printf("submitblock: %s\n", accepted ? "accepted" : reason.c_str());
+				result = accepted ? 0 : 1;
+				if (!accepted) last_error = "block rejected by pqchd: " + reason;
+				finish();
+			});
 		},
 		[&](const std::string& error)
 		{
@@ -289,10 +392,24 @@ int pqchd_check(const char* host_port, const char* credentials)
 	}
 
 	if (result) {
-		fprintf(stderr, "pqchd check FAILED: %s\n", last_error.empty() ? "no answer within 15 seconds" : last_error.c_str());
+		fprintf(stderr, "FAILED: %s\n", last_error.empty() ? "no answer within 15 seconds" : last_error.c_str());
 	}
 	delete client;
 	return result;
+}
+
+} // namespace p2pool
+
+namespace p2pool {
+
+int pqchd_check(const char* host_port, const char* credentials)
+{
+	return run_tool(host_port, credentials, nullptr);
+}
+
+int pqchd_mine_test(const char* host_port, const char* credentials, const char* payout_spec)
+{
+	return run_tool(host_port, credentials, payout_spec);
 }
 
 } // namespace p2pool
