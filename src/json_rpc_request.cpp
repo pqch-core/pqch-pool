@@ -123,6 +123,7 @@ struct CurlContext : public nocopy_nomove
 	uint64_t m_connectedTime;
 
 	std::string m_proxy;
+	std::string m_auth;
 };
 
 CurlContext::CurlContext(const std::string& address, int port, const std::string& req, const std::string& auth, const std::string& proxy, bool ssl, const std::string& ssl_fingerprint, CallbackBase* cb, CallbackBase* close_cb, uv_loop_t* loop)
@@ -163,6 +164,10 @@ CurlContext::CurlContext(const std::string& address, int port, const std::string
 		if (!m_req.empty() && (m_req.front() == '/')) {
 			s << m_req.c_str() << '\0';
 			m_req.clear();
+		}
+		else if (is_bitcoin_auth(auth)) {
+			// PQCH: pqchd (Bitcoin Core RPC) takes JSON-RPC requests at "/"
+			s << "/" << '\0';
 		}
 		else {
 			s << "/json_rpc" << '\0';
@@ -241,7 +246,13 @@ CurlContext::CurlContext(const std::string& address, int port, const std::string
 		curl_easy_setopt_checked(m_handle, CURLOPT_HTTPHEADER, m_headers);
 	}
 
-	if (!auth.empty()) {
+	if (is_bitcoin_auth(auth)) {
+		// PQCH: pqchd uses HTTP basic authentication (user:password or the cookie file's __cookie__:<password>)
+		m_auth = auth.substr(BITCOIN_AUTH_PREFIX_LEN);
+		curl_easy_setopt_checked(m_handle, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+		curl_easy_setopt_checked(m_handle, CURLOPT_USERPWD, m_auth.c_str());
+	}
+	else if (!auth.empty()) {
 		curl_easy_setopt_checked(m_handle, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST | CURLAUTH_ONLY);
 		curl_easy_setopt_checked(m_handle, CURLOPT_USERPWD, auth.c_str());
 	}

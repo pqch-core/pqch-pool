@@ -111,6 +111,7 @@ set(HEADERS
 	src/crypto.h
 	src/json_parsers.h
 	src/json_rpc_request.h
+	src/pqchd.h
 	src/keccak.h
 	src/log.h
 	src/mempool.h
@@ -147,6 +148,7 @@ set(SOURCES
 	src/console_commands.cpp
 	src/crypto.cpp
 	src/json_rpc_request.cpp
+	src/pqchd.cpp
 	src/keccak.cpp
 	src/log.cpp
 	src/main.cpp

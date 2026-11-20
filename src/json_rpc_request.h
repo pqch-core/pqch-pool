@@ -34,6 +34,13 @@ struct CallbackData
 
 typedef Callback<void, const CallbackData& /*data*/>::Base CallbackBase;
 
+// PQCH: an auth string that starts with "basic:" selects the Bitcoin Core (pqchd) RPC style:
+// POST to "/" with HTTP basic authentication ("basic:user:password"). Anything else keeps monerod's
+// style (POST to "/json_rpc", digest authentication).
+static constexpr char BITCOIN_AUTH_PREFIX[] = "basic:";
+static constexpr size_t BITCOIN_AUTH_PREFIX_LEN = sizeof(BITCOIN_AUTH_PREFIX) - 1;
+FORCEINLINE bool is_bitcoin_auth(const std::string& auth) { return auth.compare(0, BITCOIN_AUTH_PREFIX_LEN, BITCOIN_AUTH_PREFIX) == 0; }
+
 FORCEINLINE static constexpr void dummy_callback(const CallbackData& /*data*/) {}
 
 void Call(const std::string& address, int port, const std::string& req, const std::string& auth, const std::string& proxy, bool ssl, const std::string& ssl_fingerprint, CallbackBase* cb, CallbackBase* close_cb, uv_loop_t* loop);
