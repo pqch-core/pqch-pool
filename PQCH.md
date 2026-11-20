@@ -12,7 +12,7 @@ Status: **phase A done** (20 Nov 2026): one pool node on regtest finds PQCH bloc
 | Phase | What | Status |
 | --- | --- | --- |
 | A | Fork, main chain: block template, coinbase, proof of work and block submission with `pqchd`; one pool node in regtest | **done** |
-| B | Pool network: share chain between nodes, PPLNS, PQCH parameters | regtest done; testnet next |
+| B | Pool network: share chain between nodes, PPLNS, PQCH parameters | done (regtest and testnet, 20 Nov 2026) |
 | C | Miner with stratum | planned |
 | D | One-click application (Windows, Linux) | planned |
 | E | Tests with outside miners, audit scope | planned |
@@ -78,6 +78,9 @@ Phase B on testnet: `deploy/instalar_pool_testnet.sh`. Layout: the anchor VPS li
 the Kali machine mines only through the pool (`--substituir-minerador` stops its direct miner); the home server
 keeps mining the testnet directly, so pool blocks compete with solo blocks as they will on mainnet.
 Criterion: both pool nodes on the same share chain tip, and every pool block on testnet pays the PPLNS split of
-that chain.
+that chain. Met on 20 Nov 2026 (pqchd 0.3.1, pqch-pool 51ebbb6): within 15 minutes the two nodes shared one
+chain of 150 shares (difficulty retargeted from 1000 to ~50000 at one share per 10 s) and found testnet blocks
+21777-21782, found by both nodes, each paying both miners. `deploy/verificar_pool_testnet.py`, independent of
+the pool's code, gave 6 of 6 blocks with the exact PPLNS split, run on each node with its own share log.
 
 The original P2Pool README follows in `README.md`.
