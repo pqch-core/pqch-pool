@@ -1,0 +1,46 @@
+# pqch-pool CI: build and run the tests on Linux. Actions pinned by SHA (same versions as pqch-core/pqch).
+name: pqch-pool CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pqch-pool-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Submodules (no gRPC; BoringSSL only, for TLS)
+        run: |
+          git submodule update --init --depth 1 external/src/RandomX external/src/cppzmq external/src/libuv \
+            external/src/libzmq external/src/rapidjson external/src/robin-hood-hashing external/src/curl \
+            external/src/miniupnp tests/googletest
+          git submodule update --init --depth 1 external/src/grpc
+          git -C external/src/grpc submodule update --init --depth 1 third_party/boringssl-with-bazel
+      - name: Packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libuv1-dev libzmq3-dev libcurl4-openssl-dev nasm
+      - name: Build
+        run: |
+          cmake -B build -DWITH_GRPC=OFF -DWITH_MERGE_MINING_DONATION=OFF -DWITH_UPNP=OFF -DWITH_LTO=OFF
+          cmake --build build -j"$(nproc)"
+      - name: Tests
+        run: |
+          cd tests
+          cmake -B build -DWITH_GRPC=OFF -DWITH_UPNP=OFF -DWITH_LTO=OFF
+          cmake --build build -j"$(nproc)"
+          cd build
+          # pool_block.verify needs Monero share data that is not in the repository; it is replaced in phase A.
+          ./p2pool_tests --gtest_filter='-pool_block.verify'
