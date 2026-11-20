@@ -33,6 +33,7 @@ struct PoolOptions
 	uint16_t p2p_port = 0;                // listen for other pool nodes (0 = do not listen)
 	std::vector<std::string> peers;       // other pool nodes to connect to, "ip:port"
 	std::string network;                  // main | testnet | regtest (needed only without miners)
+	bool fast = false;                    // RandomX fast mode for the built-in miners (about 2 GiB of memory)
 };
 
 // `pqch-pool --pqch-pool <host:port> <cookie|user:password> <addr,addr,...|-> [--share-time S] [--min-diff D]

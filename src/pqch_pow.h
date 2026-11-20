@@ -24,9 +24,33 @@
 
 struct randomx_cache;
 struct randomx_vm;
+struct randomx_dataset;
 
 namespace p2pool {
 namespace pqch {
+
+// Fast mode: the full RandomX dataset (about 2 GiB), built once per key and shared by every miner thread.
+// Several times faster than light mode; rebuilt only when the key changes (every 4096 main-chain blocks).
+class PowDataset : public nocopy_nomove
+{
+public:
+	PowDataset() = default;
+	~PowDataset();
+
+	// Build the dataset for `key` with `threads` threads (seconds to a minute). Cheap if the key did not change.
+	// False if the memory cannot be allocated. Not thread-safe: the caller serializes calls.
+	bool prepare(const hash& key, unsigned threads);
+	randomx_dataset* dataset() const { return m_dataset; }
+	const hash& key() const { return m_key; }
+	uint64_t generation() const { return m_generation; } // changes with every rebuild
+
+private:
+	randomx_cache* m_cache = nullptr;
+	randomx_dataset* m_dataset = nullptr;
+	hash m_key;
+	bool m_ready = false;
+	uint64_t m_generation = 0;
+};
 
 class PowHasher : public nocopy_nomove
 {
@@ -38,6 +62,9 @@ public:
 	bool set_key(const hash& key) { return set_key(key.h, HASH_SIZE); }
 	bool set_key(const void* key, size_t size);
 
+	// Fast mode: hash with a prepared dataset instead of a light cache.
+	bool use_dataset(const PowDataset& d);
+
 	// RandomX v2 hash of `data` (the 80-byte header). Not thread-safe: one PowHasher per thread.
 	hash calculate(const void* data, size_t size);
 
@@ -48,6 +75,7 @@ private:
 	bool m_haveKey = false;
 	randomx_cache* m_cache = nullptr;
 	randomx_vm* m_vm = nullptr;
+	uint64_t m_datasetGeneration = 0;  // 0: light mode
 };
 
 } // namespace pqch

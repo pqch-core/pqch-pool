@@ -34,6 +34,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <shared_mutex>
 #include <thread>
 
 LOG_CATEGORY(PqchPool)
@@ -86,6 +87,8 @@ struct Pool : public P2PHandler
 	std::set<uint64_t> seeds_requested;
 	ShareQueue waiting_for_seed;
 	PowHasher net_hasher;                 // loop thread only
+	PowDataset dataset;                   // fast mode: shared by the miner threads
+	std::shared_mutex dataset_lock;       // miners hash under a shared lock; rebuilding takes it exclusively
 
 	std::atomic<uint64_t> current_generation{ 0 };
 	std::atomic<bool> stop{ false };
@@ -388,18 +391,43 @@ struct Pool : public P2PHandler
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 				continue;
 			}
-			if (!hasher.set_key(w.tmpl.seed_hash)) {
+			if (opt.fast) {
+				bool rebuild;
+				{
+					std::shared_lock<std::shared_mutex> r(dataset_lock);
+					rebuild = (dataset.generation() == 0) || (dataset.key() != w.tmpl.seed_hash);
+				}
+				if (rebuild) {
+					std::unique_lock<std::shared_mutex> x(dataset_lock);
+					if (!dataset.prepare(w.tmpl.seed_hash, static_cast<unsigned>(std::max<size_t>(1, std::thread::hardware_concurrency())))) {
+						stop = true;
+						return;
+					}
+				}
+			}
+			else if (!hasher.set_key(w.tmpl.seed_hash)) {
 				stop = true;
 				return;
 			}
 			const difficulty_type share_diff(w.share_difficulty);
-			while (!stop && (current_generation == generation)) {
-				make_header(w.tmpl, w.merkle_root, static_cast<uint32_t>(w.timestamp), nonce++, header);
-				const hash pow = hasher.calculate(header, sizeof(header));
-				++hashes;
-				if (share_diff.check_pow(pow)) {
-					on_own_share(index, generation, header, pow);
-					break;
+			bool found = false;
+			while (!found && !stop && (current_generation == generation)) {
+				// batches of 16 hashes; in fast mode under the dataset's shared lock (it may be rebuilt in between)
+				std::shared_lock<std::shared_mutex> r(dataset_lock, std::defer_lock);
+				if (opt.fast) {
+					r.lock();
+					if ((dataset.key() != w.tmpl.seed_hash) || !hasher.use_dataset(dataset)) break;
+				}
+				for (int i = 0; i < 16; ++i) {
+					make_header(w.tmpl, w.merkle_root, static_cast<uint32_t>(w.timestamp), nonce++, header);
+					const hash pow = hasher.calculate(header, sizeof(header));
+					++hashes;
+					if (share_diff.check_pow(pow)) {
+						if (r.owns_lock()) r.unlock();
+						on_own_share(index, generation, header, pow);
+						found = true;
+						break;
+					}
 				}
 			}
 		}
