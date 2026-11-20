@@ -12,7 +12,7 @@ Status: **phase A done** (20 Nov 2026): one pool node on regtest finds PQCH bloc
 | Phase | What | Status |
 | --- | --- | --- |
 | A | Fork, main chain: block template, coinbase, proof of work and block submission with `pqchd`; one pool node in regtest | **done** |
-| B | Pool network: share chain between nodes, PPLNS, PQCH parameters | planned |
+| B | Pool network: share chain between nodes, PPLNS, PQCH parameters | regtest done; testnet next |
 | C | Miner with stratum | planned |
 | D | One-click application (Windows, Linux) | planned |
 | E | Tests with outside miners, audit scope | planned |
@@ -46,7 +46,10 @@ cmake --build build -j
 | P2MR addresses, PPLNS split, coinbase, merkle root, 80-byte header, block | `src/pqch_block.*` |
 | RandomX v2 proof of work (checked against the official vectors, as `pqchd`) | `src/pqch_pow.*` |
 | Share chain: share ids committed in the coinbase, PPLNS window of 2,160 shares, share difficulty for one share per 10 s | `src/pqch_sidechain.*` |
-| One pool node with built-in miners | `src/pqch_pool.cpp` |
+| Pool node with built-in miners | `src/pqch_pool.cpp` |
+| Share tree with fork choice (most cumulative work) | `src/pqch_sidechain.*` |
+| Shares between nodes: message with the coinbase and its merkle branch; check of PoW, id, coinbase = PPLNS split | `src/pqch_share.*` |
+| Pool network (TCP: hello, share, get share, get tip, not found; size and rate limits; reconnection) | `src/pqch_p2p.*` |
 
 The share chain is PQCH's own, with P2Pool's rules: P2Pool's `side_chain.cpp` is built around Monero's
 transaction format (one-time keys, derived outputs, merge-mining proofs). P2Pool's networking, stratum server
@@ -57,11 +60,16 @@ Commands (development):
 ```
 p2pool --pqchd-check 127.0.0.1:<rpcport> <datadir>/<network>/.cookie        # can the pool work with this node?
 p2pool --pqch-pool 127.0.0.1:<rpcport> <cookie> <P2MR address>,<P2MR address> \
-       [--share-time 10] [--min-diff 100000] [--seconds 60] [--log pqch-pool.jsonl]
+       [--share-time 10] [--min-diff 100000] [--seconds 0] [--log pqch-pool.jsonl] \
+       [--p2p-port 37890] [--peer <ip:port>]... [--network main|testnet|regtest]
+# "-" instead of the addresses: a node without miners (needs --network)
 ```
 
 Acceptance tests against a real `pqchd` (also in CI, job "Pool against pqchd"):
-`tests/pqch/regtest_mine.sh` and `tests/pqch/regtest_pool.sh` (the second one checks, independently of the
+`tests/pqch/regtest_mine.sh`, `tests/pqch/regtest_pool.sh` and `tests/pqch/regtest_two_pools.sh` (two pqchd and
+two pool nodes, each with its own miner, plus a third node without miners that joins halfway: same share
+chain tip on all three, every block pays the PPLNS split of the common chain, each node's blocks pay the other
+node's miner) (the second one checks, independently of the
 pool's code, that every coinbase on chain equals the PPLNS split of the share chain). On regtest the main
 difficulty is minimal, so every share is also a block; shares that are not blocks are covered by the unit tests
 and by the testnet in phase B.

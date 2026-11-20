@@ -125,6 +125,7 @@ void p2pool_usage()
 		"--pqchd-check host:port cookie|user:password  PQCH: check that the pool can get work from pqchd, then exit\n"
 		"--pqch-pool host:port cookie|user:password addr,addr,...  PQCH (phase A): one pool node, one built-in miner per address\n"
 		"                          [--share-time S] [--min-diff D] [--seconds N] [--log FILE]\n"
+		"                          [--p2p-port P] [--peer ip:port]... [--network main|testnet|regtest]\n"
 		"--pqchd-mine-test host:port cookie|user:password addr:weight,...  PQCH (regtest): mine one block paying these addresses, then exit\n"
 		"--help                    Show this help message\n\n"
 		"Example command line:\n\n"
@@ -333,7 +334,7 @@ int main(int argc, char* argv[])
 			for (size_t a = 0, b; a < list.size(); a = b + 1) {
 				b = list.find(',', a);
 				if (b == std::string::npos) b = list.size();
-				if (b > a) pqch_pool_options.miners.push_back(list.substr(a, b - a));
+				if ((b > a) && (list.substr(a, b - a) != "-")) pqch_pool_options.miners.push_back(list.substr(a, b - a)); // "-": no miners
 			}
 			run_pqch_pool = true;
 			i += 3;
@@ -344,6 +345,9 @@ int main(int argc, char* argv[])
 			if (!strcmp(argv[i], "--min-diff")) { pqch_pool_options.min_difficulty = strtoull(argv[++i], nullptr, 10); continue; }
 			if (!strcmp(argv[i], "--seconds")) { pqch_pool_options.seconds = strtoull(argv[++i], nullptr, 10); continue; }
 			if (!strcmp(argv[i], "--log")) { pqch_pool_options.log_file = argv[++i]; continue; }
+			if (!strcmp(argv[i], "--p2p-port")) { pqch_pool_options.p2p_port = static_cast<uint16_t>(strtoul(argv[++i], nullptr, 10)); continue; }
+			if (!strcmp(argv[i], "--peer")) { pqch_pool_options.peers.push_back(argv[++i]); continue; }
+			if (!strcmp(argv[i], "--network")) { pqch_pool_options.network = argv[++i]; continue; }
 		}
 
 		if (!strcmp(argv[i], "--pqchd-mine-test") && (i + 3 < argc)) {

@@ -91,3 +91,5 @@ jobs:
         run: tests/pqch/regtest_mine.sh pqch/build/bin build/p2pool
       - name: One pool node finds blocks that pay the share chain (phase A criterion)
         run: tests/pqch/regtest_pool.sh pqch/build/bin build/p2pool 90
+      - name: Two pool nodes form one pool; a late node syncs (phase B, regtest)
+        run: tests/pqch/regtest_two_pools.sh pqch/build/bin build/p2pool 120

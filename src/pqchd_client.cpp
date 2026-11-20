@@ -192,6 +192,30 @@ void PqchdClient::submit_block(std::vector<uint8_t>&& block, SubmitCallback cb)
 	(void)alive;
 }
 
+void PqchdClient::get_block_hash(uint64_t height, std::function<void(bool, const hash&)> cb)
+{
+	std::shared_ptr<bool> answered = std::make_shared<bool>(false);
+	const std::string req = R"({"jsonrpc":"1.0","id":"pqch-pool","method":"getblockhash","params":[)" + std::to_string(height) + "]}";
+	JSONRPCRequest::call(m_config.address, m_config.port, req, m_config.auth, std::string(), false, std::string(),
+		[cb, answered](const JSONRPCRequest::CallbackData& data)
+		{
+			*answered = true;
+			hash h;
+			const std::string r(data.m_response.begin(), data.m_response.end());
+			const size_t p = r.find(R"("result":")");
+			if ((p == std::string::npos) || (p + 10 + 64 > r.size())) { cb(false, h); return; }
+			hash shown;
+			if (!from_hex(r.c_str() + p + 10, 64, shown)) { cb(false, h); return; }
+			for (size_t i = 0; i < HASH_SIZE; ++i) h.h[i] = shown.h[HASH_SIZE - 1 - i];
+			cb(true, h);
+		},
+		[cb, answered](const JSONRPCRequest::CallbackData&)
+		{
+			if (!*answered) cb(false, hash());
+		},
+		m_loop);
+}
+
 bool parse_pqchd_connection(const char* host_port, const char* credentials, PqchdClient::Config& config, std::string& error)
 {
 	const std::string hp = host_port;

@@ -95,7 +95,11 @@ public:
 	// difficulty = next_difficulty(parent), id matches its fields, header builds on main_prev, PoW meets the
 	// difficulty, time not too far before the parent's. Sets `became_tip` when the share is the new tip.
 	// (The coinbase is checked separately: verify_share_block.)
-	bool add(const Share& share, std::string& error, bool* became_tip = nullptr);
+	//
+	// `history` is for a node joining a chain whose start the others have already pruned: the oldest shares it
+	// fetches are added with history = true (unknown parent allowed as a root, difficulty not checked); the
+	// id and the PoW at the share's stated difficulty are still checked.
+	bool add(const Share& share, std::string& error, bool* became_tip = nullptr, bool history = false);
 
 	// Up to `n` shares of the branch ending with `id`, newest first.
 	std::vector<const Share*> branch(const hash& id, uint64_t n) const;

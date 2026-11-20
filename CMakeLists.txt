@@ -117,6 +117,7 @@ set(HEADERS
 	src/pqch_pow.h
 	src/pqch_sidechain.h
 	src/pqch_share.h
+	src/pqch_p2p.h
 	src/pqch_pool.h
 	src/keccak.h
 	src/log.h
@@ -160,6 +161,7 @@ set(SOURCES
 	src/pqch_pow.cpp
 	src/pqch_sidechain.cpp
 	src/pqch_share.cpp
+	src/pqch_p2p.cpp
 	src/pqch_pool.cpp
 	src/keccak.cpp
 	src/log.cpp

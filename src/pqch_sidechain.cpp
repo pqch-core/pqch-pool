@@ -120,7 +120,7 @@ std::vector<PayoutWeight> SideChain::pplns_weights(const Share* parent, const st
 	return w;
 }
 
-bool SideChain::add(const Share& s, std::string& error, bool* became_tip)
+bool SideChain::add(const Share& s, std::string& error, bool* became_tip, bool history)
 {
 	if (became_tip) *became_tip = false;
 	if (contains(s.id)) { error = "duplicate share"; return false; }
@@ -131,11 +131,12 @@ bool SideChain::add(const Share& s, std::string& error, bool* became_tip)
 	}
 	else {
 		parent = get(s.parent);
-		if (!parent) { error = "unknown parent"; return false; }
-		if (s.height != parent->height + 1) { error = "wrong share height"; return false; }
-		if (s.timestamp + 600 < parent->timestamp) { error = "timestamp too far in the past"; return false; }
+		if (!parent && !history) { error = "unknown parent"; return false; }
+		if (parent && (s.height != parent->height + 1)) { error = "wrong share height"; return false; }
+		if (parent && (s.timestamp + 600 < parent->timestamp)) { error = "timestamp too far in the past"; return false; }
 	}
-	if (s.difficulty != next_difficulty(parent)) { error = "wrong share difficulty"; return false; }
+	if (!history && (s.difficulty != next_difficulty(parent))) { error = "wrong share difficulty"; return false; }
+	if (s.difficulty == 0) { error = "zero difficulty"; return false; }
 
 	const hash id = sha256d(share_id_preimage(s.parent, s.height, s.difficulty, s.timestamp, s.miner_script, s.main_prev, s.main_height));
 	if (id != s.id) { error = "share id does not match its fields"; return false; }

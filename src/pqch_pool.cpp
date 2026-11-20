@@ -15,20 +15,25 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-// PQCH phase A: one pool node. It takes work from pqchd, keeps the share chain, runs one built-in miner
-// thread per miner address, adds the shares they find and submits the ones that are PQCH blocks. Every
-// share and block is written as a JSON line to the log file, so that a test can check the coinbases
+// A PQCH pool node. It takes work from pqchd, keeps the share tree, runs one built-in miner thread per miner
+// address, exchanges shares with the other pool nodes (pqch_p2p), checks every share it receives (PoW,
+// coinbase = PPLNS split, chain rules) and submits the shares of its own miners that are PQCH blocks.
+// Every share and block is written as a JSON line to the log file, so that tests can check the coinbases
 // against the share chain independently.
 
 #include "common.h"
 #include "pqch_pool.h"
 #include "pqchd_client.h"
 #include "pqch_sidechain.h"
+#include "pqch_share.h"
+#include "pqch_p2p.h"
 #include "pqch_pow.h"
 #include "json_rpc_request.h"
 #include <atomic>
 #include <fstream>
+#include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 
 LOG_CATEGORY(PqchPool)
@@ -46,27 +51,51 @@ std::string rpc_hex(const hash& h)
 	return s;
 }
 
-struct Pool
+// RandomX key schedule of PQCH (pow_randomx.cpp, every network): 4096-block epochs, 64-block lag
+uint64_t seed_height_for(uint64_t height)
+{
+	constexpr uint64_t interval = 4096, lag = 64;
+	if (height <= interval + lag) return 0;
+	return (height - lag - 1) & ~(interval - 1);
+}
+
+constexpr size_t MAX_PENDING = 8192; // shares waiting for their parent
+
+typedef std::vector<std::pair<std::vector<uint8_t>, uint64_t>> ShareQueue; // (serialized share, peer)
+
+struct Pool : public P2PHandler
 {
 	PoolOptions opt;
 	Network net = Network::REGTEST;
 	std::vector<std::vector<uint8_t>> miner_scripts;
 
-	std::mutex lock;                      // protects everything below
+	std::recursive_mutex lock;            // protects everything below (miner threads and the loop thread)
 	SideChain chain{ SideChainParams() };
 	bool have_template = false;
 	pqchd::Template tmpl;
 	std::vector<Work> works;              // one per miner thread
 	uint64_t work_generation = 0;
-	uint64_t shares_found = 0, blocks_found = 0, blocks_accepted = 0, blocks_rejected = 0;
+	uint64_t shares_found = 0, shares_received = 0, blocks_found = 0, blocks_accepted = 0, blocks_rejected = 0;
 	std::ofstream log;
+
+	unordered_map<hash, std::vector<uint8_t>> share_bytes; // serialized shares of the tree
+	std::map<hash, ShareQueue> pending;   // parent id -> shares waiting for it
+	size_t pending_count = 0;
+	std::set<hash> requested;             // parents asked for
+	std::map<uint64_t, hash> seeds;       // RandomX key per seed height
+	std::set<uint64_t> seeds_requested;
+	ShareQueue waiting_for_seed;
+	PowHasher net_hasher;                 // loop thread only
 
 	std::atomic<uint64_t> current_generation{ 0 };
 	std::atomic<bool> stop{ false };
 	std::atomic<uint64_t> hashes{ 0 };
 
 	PqchdClient* client = nullptr;
+	P2P* p2p = nullptr;
 	uv_loop_t* loop = nullptr;
+
+	typedef std::lock_guard<std::recursive_mutex> Guard;
 
 	std::string address(const std::vector<uint8_t>& script) const
 	{
@@ -75,7 +104,8 @@ struct Pool
 		return a;
 	}
 
-	// lock held
+	// ---------------------------------------------------------------- work (lock held)
+
 	void rebuild_works()
 	{
 		if (!have_template) return;
@@ -89,34 +119,50 @@ struct Pool
 		current_generation = work_generation;
 	}
 
-	void on_template(const pqchd::Template& t)
+	void log_share(const Share& s, bool is_block, bool own)
 	{
-		std::lock_guard<std::mutex> g(lock);
-		tmpl = t;
-		have_template = true;
-		rebuild_works();
+		log << R"({"type":"share","id":")" << rpc_hex(s.id) << R"(","parent":")" << rpc_hex(s.parent)
+			<< R"(","height":)" << s.height << R"(,"difficulty":)" << s.difficulty << R"(,"miner":")" << address(s.miner_script)
+			<< R"(","main_height":)" << s.main_height << R"(,"block":)" << (is_block ? "true" : "false")
+			<< R"(,"own":)" << (own ? "true" : "false") << "}\n";
+		log.flush();
 	}
 
-	// miner thread: a header met the share difficulty
-	void on_share(size_t miner, uint64_t generation, const uint8_t (&header)[HEADER_SIZE], const hash& pow)
+	void on_template(const pqchd::Template& t)
 	{
-		std::vector<uint8_t> block;
+		ShareQueue retry;
+		{
+			Guard g(lock);
+			tmpl = t;
+			have_template = true;
+			seeds[t.seed_height] = t.seed_hash;
+			rebuild_works();
+			retry.swap(waiting_for_seed);
+		}
+		for (auto& r : retry) process_share(r.first, r.second, false);
+	}
+
+	// ---------------------------------------------------------------- own shares (miner threads)
+
+	void on_own_share(size_t miner, uint64_t generation, const uint8_t (&header)[HEADER_SIZE], const hash& pow)
+	{
+		std::vector<uint8_t> block, msg;
 		std::string json;
 		{
-			std::lock_guard<std::mutex> g(lock);
+			Guard g(lock);
 			if (generation != work_generation) return; // stale: the work changed meanwhile
 			const Work& w = works[miner];
 			const Share s = make_share(w, header, pow);
 			std::string error;
 			if (!chain.add(s, error)) {
-				LOGWARN(0, "share refused: " << error);
+				LOGWARN(0, "own share refused: " << error);
 				return;
 			}
 			++shares_found;
+			msg = serialize(make_share_message(w, s));
+			share_bytes[s.id] = msg;
 			const bool is_block = check_pow(pow, w.tmpl.target);
-			log << R"({"type":"share","id":")" << rpc_hex(s.id) << R"(","parent":")" << rpc_hex(s.parent)
-				<< R"(","height":)" << s.height << R"(,"difficulty":)" << s.difficulty << R"(,"miner":")" << address(s.miner_script)
-				<< R"(","main_height":)" << s.main_height << R"(,"block":)" << (is_block ? "true" : "false") << "}\n";
+			log_share(s, is_block, true);
 			LOGINFO(3, "share " << s.height << " by miner " << miner << ", difficulty " << s.difficulty << (is_block ? " - a PQCH block!" : ""));
 
 			if (is_block) {
@@ -130,10 +176,8 @@ struct Pool
 				json = R"({"type":"block","hash":")" + rpc_hex(block_hash(header)) + R"(","height":)" + std::to_string(w.tmpl.height)
 					+ R"(,"share":")" + rpc_hex(s.id) + R"(","coinbase_value":)" + std::to_string(w.tmpl.coinbase_value)
 					+ R"(,"payouts":[)" + pays + "]";
-			}
-			if (is_block) {
-				// Our block becomes the main-chain tip: stop mining on the old one until pqchd hands out the
-				// next template (asked for right away below), or the miners would only find stale blocks.
+				// Our block becomes the main-chain tip: stop mining on the old one until pqchd hands out the next
+				// template (asked for right away), or the miners would only find stale blocks.
 				have_template = false;
 				++work_generation;
 				current_generation = work_generation;
@@ -143,27 +187,184 @@ struct Pool
 			}
 		}
 
-		if (!block.empty()) {
-			std::vector<uint8_t>* b = new std::vector<uint8_t>(std::move(block));
-			CallOnLoop(loop, [this, b, json]() {
-				client->submit_block(std::move(*b), [this, json](bool accepted, const std::string& reason) {
-					{
-						std::lock_guard<std::mutex> g(lock);
-						(accepted ? blocks_accepted : blocks_rejected)++;
-						log << json << R"(,"accepted":)" << (accepted ? "true" : "false") << R"(,"reason":")" << reason << "\"}\n";
-						log.flush();
-						if (!accepted && !have_template) {
-							// the tip did not change, so no new template will come: go back to the current one
-							have_template = true;
-							rebuild_works();
-						}
+		std::vector<uint8_t>* m = new std::vector<uint8_t>(std::move(msg));
+		std::vector<uint8_t>* b = block.empty() ? nullptr : new std::vector<uint8_t>(std::move(block));
+		CallOnLoop(loop, [this, m, b, json]() {
+			if (p2p) p2p->broadcast_share(*m);
+			delete m;
+			if (!b) return;
+			client->submit_block(std::move(*b), [this, json](bool accepted, const std::string& reason) {
+				{
+					Guard g(lock);
+					(accepted ? blocks_accepted : blocks_rejected)++;
+					log << json << R"(,"accepted":)" << (accepted ? "true" : "false") << R"(,"reason":")" << reason << "\"}\n";
+					log.flush();
+					if (!accepted && !have_template) {
+						have_template = true; // the tip did not change: no new template will come
+						rebuild_works();
 					}
-					client->poll_now();
-				});
-				delete b;
+				}
+				client->poll_now();
 			});
+			delete b;
+		});
+	}
+
+	// ---------------------------------------------------------------- shares from other nodes (loop thread)
+
+	bool on_share(const uint8_t* data, size_t size, uint64_t peer) override
+	{
+		return process_share(std::vector<uint8_t>(data, data + size), peer, false);
+	}
+
+	void request_seed(uint64_t sh)
+	{
+		client->get_block_hash(sh, [this, sh](bool ok, const hash& h) {
+			ShareQueue retry;
+			{
+				Guard g(lock);
+				seeds_requested.erase(sh);
+				if (!ok) return;
+				seeds[sh] = h;
+				retry.swap(waiting_for_seed);
+			}
+			for (auto& r : retry) process_share(r.first, r.second, false);
+		});
+	}
+
+	// `history`: the parent is not available from the network (pruned): accept the share as a root.
+	// Returns false for an invalid share (the peer is disconnected).
+	bool process_share(const std::vector<uint8_t>& bytes, uint64_t peer, bool history)
+	{
+		ShareMessage m;
+		std::string error;
+		if (!deserialize(bytes.data(), bytes.size(), m, error)) {
+			LOGWARN(1, "bad share message: " << error);
+			return false;
+		}
+		Share& s = m.share;
+
+		{
+			Guard g(lock);
+			if (chain.contains(s.id)) return true;
+
+			const Share* tip = chain.tip();
+			const uint64_t keep = chain.params().pplns_window + chain.params().difficulty_window;
+			if (tip && (s.height + keep < tip->height)) return true; // far below what this node keeps: ignore
+
+			const Share* parent = (s.height == 0) ? nullptr : chain.get(s.parent);
+			if ((s.height != 0) && !parent && !history) {
+				// wait for the parent; ask the peer for it once
+				if (pending_count < MAX_PENDING) {
+					pending[s.parent].emplace_back(bytes, peer);
+					++pending_count;
+				}
+				if (requested.insert(s.parent).second && p2p) p2p->send(peer, MsgType::GET_SHARE, s.parent.h, HASH_SIZE);
+				return true;
+			}
+
+			// proof of work: RandomX v2 of the header with the key of its main-chain height
+			const uint64_t sh = seed_height_for(s.main_height);
+			auto seed = seeds.find(sh);
+			if (seed == seeds.end()) {
+				waiting_for_seed.emplace_back(bytes, peer);
+				if (seeds_requested.insert(sh).second) request_seed(sh);
+				return true;
+			}
+			if (!net_hasher.set_key(seed->second)) return true;
+			s.pow_hash = net_hasher.calculate(s.header, HEADER_SIZE);
+
+			// what this node can check depends on how much of the share's branch it has
+			const uint64_t have = parent ? chain.branch(parent->id, chain.params().pplns_window).size() : 0;
+			const uint64_t full_pplns = parent ? std::min<uint64_t>(chain.params().pplns_window - 1, parent->height + 1) : 0;
+			const uint64_t full_diff = parent ? std::min<uint64_t>(chain.params().difficulty_window, parent->height + 1) : 0;
+			const bool check_coinbase = !history && (have >= full_pplns);
+			const bool add_as_history = history || (have < full_diff);
+
+			if (check_coinbase && !verify_share_coinbase(chain, m, error)) {
+				LOGWARN(1, "share " << s.height << " refused: " << error);
+				return false;
+			}
+			bool became_tip = false;
+			if (!chain.add(s, error, &became_tip, add_as_history)) {
+				if (error == "duplicate share") return true;
+				LOGWARN(1, "share " << s.height << " refused: " << error);
+				return false;
+			}
+			++shares_received;
+			share_bytes[s.id] = bytes;
+			const bool is_block = have_template && check_pow(s.pow_hash, tmpl.target);
+			log_share(s, is_block, false);
+			LOGINFO(3, "share " << s.height << " from another node, difficulty " << s.difficulty << (became_tip ? " (new tip)" : ""));
+			if (became_tip) rebuild_works();
+			prune_bytes();
+		}
+
+		if (p2p) p2p->broadcast_share(bytes, peer);
+
+		// children that were waiting for this share
+		ShareQueue children;
+		{
+			Guard g(lock);
+			auto it = pending.find(s.id);
+			if (it != pending.end()) {
+				children.swap(it->second);
+				pending_count -= children.size();
+				pending.erase(it);
+			}
+			requested.erase(s.id);
+		}
+		for (auto& c : children) process_share(c.first, c.second, false);
+		return true;
+	}
+
+	void on_not_found(const hash& id, uint64_t) override
+	{
+		// The network no longer has this share: its children start this node's tree.
+		ShareQueue children;
+		{
+			Guard g(lock);
+			auto it = pending.find(id);
+			if (it == pending.end()) return;
+			children.swap(it->second);
+			pending_count -= children.size();
+			pending.erase(it);
+			requested.erase(id);
+		}
+		for (auto& c : children) process_share(c.first, c.second, true);
+	}
+
+	bool get_share(const hash& id, std::vector<uint8_t>& out) override
+	{
+		Guard g(lock);
+		auto it = share_bytes.find(id);
+		if (it == share_bytes.end()) return false;
+		out = it->second;
+		return true;
+	}
+
+	bool get_tip(std::vector<uint8_t>& out) override
+	{
+		Guard g(lock);
+		const Share* t = chain.tip();
+		if (!t) return false;
+		auto it = share_bytes.find(t->id);
+		if (it == share_bytes.end()) return false;
+		out = it->second;
+		return true;
+	}
+
+	// lock held
+	void prune_bytes()
+	{
+		if (share_bytes.size() <= chain.size() + 64) return;
+		for (auto it = share_bytes.begin(); it != share_bytes.end();) {
+			if (!chain.contains(it->first)) it = share_bytes.erase(it);
+			else ++it;
 		}
 	}
+
+	// ---------------------------------------------------------------- miner threads
 
 	void miner_thread(size_t index)
 	{
@@ -174,7 +375,7 @@ struct Pool
 			Work w;
 			uint64_t generation;
 			{
-				std::lock_guard<std::mutex> g(lock);
+				Guard g(lock);
 				if (!have_template || (index >= works.size())) {
 					generation = 0;
 				}
@@ -197,7 +398,7 @@ struct Pool
 				const hash pow = hasher.calculate(header, sizeof(header));
 				++hashes;
 				if (share_diff.check_pow(pow)) {
-					on_share(index, generation, header, pow);
+					on_own_share(index, generation, header, pow);
 					break;
 				}
 			}
@@ -218,6 +419,13 @@ int run_pool(const PoolOptions& opt)
 	pool.chain = SideChain(p);
 
 	bool net_known = false;
+	if (!opt.network.empty()) {
+		if (opt.network == "main") pool.net = Network::MAIN;
+		else if (opt.network == "testnet") pool.net = Network::TEST;
+		else if (opt.network == "regtest") pool.net = Network::REGTEST;
+		else { fprintf(stderr, "unknown network %s\n", opt.network.c_str()); return 1; }
+		net_known = true;
+	}
 	for (const std::string& a : opt.miners) {
 		std::vector<uint8_t> script;
 		bool ok = false;
@@ -234,8 +442,12 @@ int run_pool(const PoolOptions& opt)
 		}
 		pool.miner_scripts.push_back(script);
 	}
-	if (pool.miner_scripts.empty()) {
-		fprintf(stderr, "no miner addresses\n");
+	if (pool.miner_scripts.empty() && opt.peers.empty() && !opt.p2p_port) {
+		fprintf(stderr, "no miner addresses and no pool network: nothing to do\n");
+		return 1;
+	}
+	if (!net_known) {
+		fprintf(stderr, "a node without miners needs --network main|testnet|regtest\n");
 		return 1;
 	}
 
@@ -258,40 +470,54 @@ int run_pool(const PoolOptions& opt)
 	pool.client = &client;
 	if (!client.start(loop)) return 1;
 
+	P2P* p2p = nullptr;
+	if (opt.p2p_port || !opt.peers.empty()) {
+		p2p = new P2P(loop, pool.net, opt.p2p_port, opt.peers, &pool);
+		if (!p2p->start()) return 1;
+		pool.p2p = p2p;
+	}
+
 	std::vector<std::thread> threads;
 	for (size_t i = 0; i < pool.miner_scripts.size(); ++i) {
 		threads.emplace_back([&pool, i]() { pool.miner_thread(i); });
 	}
 
-	// stop after opt.seconds; then let the last block submissions finish
+	// stop after opt.seconds (0 = run until killed); then let the last block submissions finish
 	uv_timer_t stopper{};
 	uv_timer_init(loop, &stopper);
 	stopper.data = &pool;
-	uv_timer_start(&stopper, [](uv_timer_t* t) {
-		Pool* pl = static_cast<Pool*>(t->data);
-		pl->stop = true;
-		pl->client->stop();
-		uv_close(reinterpret_cast<uv_handle_t*>(t), nullptr);
-		uv_timer_t* closer = new uv_timer_t{};
-		uv_timer_init(t->loop, closer);
-		uv_timer_start(closer, [](uv_timer_t* c) {
-			DeleteLoopUserData(c->loop);
-			uv_close(reinterpret_cast<uv_handle_t*>(c), [](uv_handle_t* h) { delete reinterpret_cast<uv_timer_t*>(h); });
-		}, 3000, 0);
-	}, opt.seconds * 1000, 0);
+	if (opt.seconds) {
+		uv_timer_start(&stopper, [](uv_timer_t* t) {
+			Pool* pl = static_cast<Pool*>(t->data);
+			pl->stop = true;
+			pl->client->stop();
+			if (pl->p2p) pl->p2p->stop();
+			uv_close(reinterpret_cast<uv_handle_t*>(t), nullptr);
+			uv_timer_t* closer = new uv_timer_t{};
+			uv_timer_init(t->loop, closer);
+			uv_timer_start(closer, [](uv_timer_t* c) {
+				DeleteLoopUserData(c->loop);
+				uv_close(reinterpret_cast<uv_handle_t*>(c), [](uv_handle_t* h) { delete reinterpret_cast<uv_timer_t*>(h); });
+			}, 3000, 0);
+		}, opt.seconds * 1000, 0);
+	}
 
 	uv_run(loop, UV_RUN_DEFAULT);
 	for (std::thread& t : threads) t.join();
+	delete p2p;
 
 	if (own_tracker) {
 		delete bkg_jobs_tracker;
 		bkg_jobs_tracker = nullptr;
 	}
 
-	printf("pqch-pool: %llu hashes, %llu shares (chain height %llu), %llu blocks found, %llu accepted, %llu rejected\n",
+	const Share* tip = pool.chain.tip();
+	printf("pqch-pool: %llu hashes, %llu own shares, %llu received, tip height %llu, %llu blocks found, %llu accepted, %llu rejected\n",
 		static_cast<unsigned long long>(pool.hashes.load()), static_cast<unsigned long long>(pool.shares_found),
-		static_cast<unsigned long long>(pool.chain.size()), static_cast<unsigned long long>(pool.blocks_found),
-		static_cast<unsigned long long>(pool.blocks_accepted), static_cast<unsigned long long>(pool.blocks_rejected));
+		static_cast<unsigned long long>(pool.shares_received), static_cast<unsigned long long>(tip ? tip->height : 0),
+		static_cast<unsigned long long>(pool.blocks_found), static_cast<unsigned long long>(pool.blocks_accepted),
+		static_cast<unsigned long long>(pool.blocks_rejected));
+	if (tip) printf("pqch-pool: tip %s\n", rpc_hex(tip->id).c_str());
 	return (pool.blocks_rejected == 0) ? 0 : 1;
 }
 

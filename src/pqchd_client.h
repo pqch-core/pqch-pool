@@ -58,6 +58,9 @@ public:
 	// Ask for a template now (e.g. right after this pool found a block), not at the next tick.
 	void poll_now() { poll(); }
 
+	// Hash of the main-chain block at `height` (internal byte order), e.g. a RandomX key. cb(false, ...) on error.
+	void get_block_hash(uint64_t height, std::function<void(bool ok, const hash& h)> cb);
+
 	// Submit a serialized block (header + transactions, with witness). The callback runs on the loop thread.
 	void submit_block(std::vector<uint8_t>&& block, SubmitCallback cb);
 
