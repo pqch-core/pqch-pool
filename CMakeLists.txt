@@ -113,6 +113,7 @@ set(HEADERS
 	src/json_rpc_request.h
 	src/pqchd.h
 	src/pqchd_client.h
+	src/pqch_block.h
 	src/keccak.h
 	src/log.h
 	src/mempool.h
@@ -151,6 +152,7 @@ set(SOURCES
 	src/json_rpc_request.cpp
 	src/pqchd.cpp
 	src/pqchd_client.cpp
+	src/pqch_block.cpp
 	src/keccak.cpp
 	src/log.cpp
 	src/main.cpp
