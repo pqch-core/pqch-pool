@@ -63,6 +63,9 @@ struct Share
 std::vector<uint8_t> share_id_preimage(const hash& parent, uint64_t height, uint64_t difficulty, uint64_t timestamp,
 	const std::vector<uint8_t>& miner_script, const hash& main_prev, uint64_t main_height);
 
+// The shares known to this node form a tree (two nodes may find a share on the same parent at the same
+// time). The tip is the end of the branch with the most cumulative work (sum of share difficulties); on a
+// tie the branch seen first stays. Shares far below the tip are pruned.
 class SideChain
 {
 public:
@@ -70,27 +73,46 @@ public:
 
 	const SideChainParams& params() const { return m_params; }
 
-	// Tip of the chain, or nullptr if there are no shares yet.
-	const Share* tip() const { return m_chain.empty() ? nullptr : &m_chain.back(); }
-	uint64_t size() const { return m_chain.size(); }
+	// Tip of the best branch, or nullptr if there are no shares yet.
+	const Share* tip() const;
+	const Share* get(const hash& id) const;
+	bool contains(const hash& id) const { return m_shares.find(id) != m_shares.end(); }
+	uint64_t size() const { return m_shares.size(); }
 
-	// Difficulty the next share (on top of the tip) must meet.
-	uint64_t next_difficulty() const;
+	// Difficulty a share on top of `parent` (nullptr: a first share) must meet; next_difficulty() is on the tip.
+	uint64_t next_difficulty(const Share* parent) const;
+	uint64_t next_difficulty() const { return next_difficulty(tip()); }
 
-	// PPLNS weights of a new share by `miner_script` with difficulty `difficulty` on top of the tip:
-	// the last pplns_window - 1 shares of the chain plus the new share.
-	std::vector<PayoutWeight> pplns_weights(const std::vector<uint8_t>& miner_script, uint64_t difficulty) const;
+	// PPLNS weights of a new share by `miner_script` with `difficulty` on top of `parent`: the last
+	// pplns_window - 1 shares of that branch plus the new share. The tip version is pplns_weights(miner, d).
+	std::vector<PayoutWeight> pplns_weights(const Share* parent, const std::vector<uint8_t>& miner_script, uint64_t difficulty) const;
+	std::vector<PayoutWeight> pplns_weights(const std::vector<uint8_t>& miner_script, uint64_t difficulty) const
+	{
+		return pplns_weights(tip(), miner_script, difficulty);
+	}
 
-	// Check a share and append it: parent = tip, height, difficulty = next_difficulty(), id matches its
-	// fields, the header's PoW meets the difficulty. (The coinbase is checked by whoever built the block.)
-	bool add(const Share& share, std::string& error);
+	// Check a share and add it to the tree: known parent (or none, for a first share at height 0), height,
+	// difficulty = next_difficulty(parent), id matches its fields, header builds on main_prev, PoW meets the
+	// difficulty, time not too far before the parent's. Sets `became_tip` when the share is the new tip.
+	// (The coinbase is checked separately: verify_share_block.)
+	bool add(const Share& share, std::string& error, bool* became_tip = nullptr);
 
-	// The shares from the oldest kept to the tip (at most pplns_window + difficulty_window).
-	const std::deque<Share>& shares() const { return m_chain; }
+	// Up to `n` shares of the branch ending with `id`, newest first.
+	std::vector<const Share*> branch(const hash& id, uint64_t n) const;
 
 private:
+	struct Node
+	{
+		Share share;
+		difficulty_type cumulative; // work of the branch up to and including this share
+	};
+
+	void prune();
+
 	SideChainParams m_params;
-	std::deque<Share> m_chain;
+	unordered_map<hash, Node> m_shares;
+	hash m_tip;
+	bool m_haveTip = false;
 };
 
 // One unit of mining work: everything a miner thread needs to hash and to turn a winning header into a share

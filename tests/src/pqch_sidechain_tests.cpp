@@ -76,7 +76,7 @@ TEST(pqch_sidechain, add_and_reject)
 
 	pqch::Share s = next_share(c, A, 120);
 	s.parent.h[0] ^= 1;
-	EXPECT_FALSE(c.add(s, error)); EXPECT_EQ(error, "parent is not the tip");
+	EXPECT_FALSE(c.add(s, error)); EXPECT_EQ(error, "unknown parent");
 
 	s = next_share(c, A, 120); s.height += 1;
 	EXPECT_FALSE(c.add(s, error)); EXPECT_EQ(error, "wrong share height");
@@ -140,13 +140,13 @@ TEST(pqch_sidechain, pplns_window)
 	for (const auto* m : { &A, &A, &B, &B, &B, &C }) {
 		ASSERT_TRUE(c.add(next_share(c, *m, t += 10), error)) << error;
 	}
-	// a new share by A: the window is the last 3 shares of the chain (B, B, C) plus the new one (A)
+	// a new share by A: the window is the new one (A) plus the last 3 shares of the chain (C, B, B), newest first
 	const std::vector<pqch::PayoutWeight> w = c.pplns_weights(A, 1000);
 	ASSERT_EQ(w.size(), 4u);
 	EXPECT_EQ(w[0].script, A);
-	EXPECT_EQ(w[1].script, B);
+	EXPECT_EQ(w[1].script, C);
 	EXPECT_EQ(w[2].script, B);
-	EXPECT_EQ(w[3].script, C);
+	EXPECT_EQ(w[3].script, B);
 
 	// split of 4000 among equal difficulties: A 1000, B 2000, C 1000
 	const std::vector<pqch::Payout> p = pqch::split_reward(4000, w, A);
@@ -158,6 +158,54 @@ TEST(pqch_sidechain, pplns_window)
 	// old shares are dropped, but enough are kept for both windows
 	for (int i = 0; i < 20; ++i) ASSERT_TRUE(c.add(next_share(c, A, t += 10), error)) << error;
 	EXPECT_EQ(c.size(), 4u + 5u);
+}
+
+// Two pool nodes find a share on the same parent at the same time: the tree keeps both, the first seen
+// stays the tip on a tie, and the branch that gets more work becomes the tip (the other one is orphaned).
+TEST(pqch_sidechain, fork_choice)
+{
+	pqch::SideChain c(small_params());
+	std::string error;
+	bool tip = false;
+	ASSERT_TRUE(c.add(next_share(c, A, 1000), error, &tip)); EXPECT_TRUE(tip);
+	const hash root = c.tip()->id;
+
+	const pqch::Share x = next_share(c, A, 1010); // node 1
+	const pqch::Share y = next_share(c, B, 1011); // node 2, same parent
+	ASSERT_TRUE(c.add(x, error, &tip)); EXPECT_TRUE(tip);
+	ASSERT_TRUE(c.add(y, error, &tip)) << error; EXPECT_FALSE(tip); // same work: x stays
+	EXPECT_EQ(c.tip()->id, x.id);
+	EXPECT_EQ(c.size(), 3u);
+	EXPECT_FALSE(c.add(y, error)); EXPECT_EQ(error, "duplicate share");
+
+	// a share on y's branch: that branch now has more work, it becomes the tip
+	pqch::Share z;
+	{
+		z.parent = y.id;
+		z.height = 2;
+		z.difficulty = c.next_difficulty(c.get(y.id));
+		z.timestamp = 1020;
+		z.miner_script = B;
+		z.main_prev.h[0] = 0x42;
+		z.main_height = 1000;
+		memcpy(z.header + 4, z.main_prev.h, HASH_SIZE);
+		z.id = sha256d(pqch::share_id_preimage(z.parent, z.height, z.difficulty, z.timestamp, z.miner_script, z.main_prev, z.main_height));
+	}
+	ASSERT_TRUE(c.add(z, error, &tip)) << error; EXPECT_TRUE(tip);
+	EXPECT_EQ(c.tip()->id, z.id);
+
+	// PPLNS follows the tip's branch: root (A), y (B), z (B); x is not in it
+	const std::vector<pqch::Payout> p = pqch::split_reward(3000 + 1000, c.pplns_weights(C, 1000), C);
+	ASSERT_EQ(p.size(), 3u);
+	EXPECT_EQ(p[0].value, 1000u); // A: root only (not x)
+	EXPECT_EQ(p[1].value, 2000u); // B: y and z
+	EXPECT_EQ(p[2].value, 1000u); // C: the new share
+	(void)root;
+
+	// a share whose parent this node has not seen is refused (the network layer asks for the parent first)
+	pqch::Share orphan = next_share(c, A, 1030);
+	orphan.parent.h[5] ^= 1;
+	EXPECT_FALSE(c.add(orphan, error)); EXPECT_EQ(error, "unknown parent");
 }
 
 TEST(pqch_sidechain, work_commits_to_the_share)
