@@ -42,6 +42,7 @@ public:
 		std::string address = "127.0.0.1";
 		int port = 0;
 		std::string auth;   // pqchd::read_cookie() or pqchd::make_auth()
+		std::string cookie_file; // if set, re-read when pqchd answers 401 (pqchd writes a new cookie when it restarts)
 	};
 
 	typedef std::function<void(const pqchd::Template&, bool new_tip)> TemplateCallback;
@@ -55,8 +56,9 @@ public:
 	bool start(uv_loop_t* loop);
 	void stop();
 
-	// Ask for a template now (e.g. right after this pool found a block), not at the next tick.
-	void poll_now() { poll(); }
+	// Ask for a template now (e.g. right after this pool found a block), not at the next tick, and report the
+	// next template even if it did not change (the caller may be waiting for one).
+	void poll_now() { m_forceNext = true; poll(); }
 
 	// Hash of the main-chain block at `height` (internal byte order), e.g. a RandomX key. cb(false, ...) on error.
 	void get_block_hash(uint64_t height, std::function<void(bool ok, const hash& h)> cb);
@@ -81,6 +83,7 @@ private:
 	bool m_stopped = false;
 
 	bool m_haveTemplate = false;
+	bool m_forceNext = false;
 	hash m_lastPrevHash;
 	std::string m_lastLongpollId;
 	uint64_t m_templatesReceived = 0;

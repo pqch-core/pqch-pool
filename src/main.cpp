@@ -401,7 +401,12 @@ int main(int argc, char* argv[])
 			fprintf(stderr, "curl_global_init failed\n");
 			return 1;
 		}
+		// log to the console only (systemd's journal keeps it); the share log is --log
+		p2pool::Params log_params(std::vector<std::vector<std::string>>{});
+		log_params.m_logFileEnabled = false;
+		p2pool::log::start(log_params);
 		result = p2pool::pqch::run_pool(pqch_pool_options);
+		p2pool::log::stop();
 		curl_global_cleanup();
 		p2pool::thread_pool_destroy();
 		uv_loop_close(uv_default_loop());

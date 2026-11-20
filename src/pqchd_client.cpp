@@ -123,9 +123,10 @@ void PqchdClient::poll()
 			m_lastError.clear();
 
 			const bool new_tip = !m_haveTemplate || (t.prev_hash != m_lastPrevHash);
-			if (!new_tip && (t.longpollid == m_lastLongpollId)) {
+			if (!new_tip && (t.longpollid == m_lastLongpollId) && !m_forceNext) {
 				return; // nothing changed
 			}
+			m_forceNext = false;
 			m_haveTemplate = true;
 			m_lastPrevHash = t.prev_hash;
 			m_lastLongpollId = t.longpollid;
@@ -143,6 +144,16 @@ void PqchdClient::poll()
 			}
 			m_requestInFlight = false;
 			if (!data.m_error.empty()) {
+				if ((data.m_error.find("HTTP error 401") != std::string::npos) && !m_config.cookie_file.empty()) {
+					std::string auth;
+					if (pqchd::read_cookie(m_config.cookie_file, auth) && (auth != m_config.auth)) {
+						LOGINFO(1, "pqchd has a new cookie (restarted?): using it");
+						m_config.auth = auth;
+						m_forceNext = true;
+						return;
+					}
+				}
+				m_forceNext = true;
 				const std::string error = "getblocktemplate request to pqchd failed: " + data.m_error;
 				if (error != m_lastError) {
 					LOGWARN(1, error);
@@ -231,7 +242,10 @@ bool parse_pqchd_connection(const char* host_port, const char* credentials, Pqch
 		return false;
 	}
 	const std::string cred = credentials;
-	if (!pqchd::read_cookie(cred, config.auth)) {
+	if (pqchd::read_cookie(cred, config.auth)) {
+		config.cookie_file = cred;
+	}
+	else {
 		const size_t c = cred.find(':');
 		if ((c == std::string::npos) || (c == 0)) {
 			error = "\"" + cred + "\" is neither a readable cookie file nor user:password";
