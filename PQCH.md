@@ -74,4 +74,10 @@ pool's code, that every coinbase on chain equals the PPLNS split of the share ch
 difficulty is minimal, so every share is also a block; shares that are not blocks are covered by the unit tests
 and by the testnet in phase B.
 
+Phase B on testnet: `deploy/instalar_pool_testnet.sh`. Layout: the anchor VPS listens on 37890 (1 thread);
+the Kali machine mines only through the pool (`--substituir-minerador` stops its direct miner); the home server
+keeps mining the testnet directly, so pool blocks compete with solo blocks as they will on mainnet.
+Criterion: both pool nodes on the same share chain tip, and every pool block on testnet pays the PPLNS split of
+that chain.
+
 The original P2Pool README follows in `README.md`.
