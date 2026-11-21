@@ -89,7 +89,6 @@ for log in logs:
             shares[r["id"]] = r
 received = [sum(1 for r in log if r["type"] == "share" and not r["own"]) for log in logs]
 assert received[0] > 0 and received[1] > 0, f"a node received no shares from the other: {received}"
-assert tips[0] == tips[1], f"the two pool nodes ended on different tips: {tips}"
 
 def branch(share_id, n):
     out = []
@@ -104,7 +103,11 @@ def branch(share_id, n):
 # one tree: every share's parent is known (or it is a first share)
 for s in shares.values():
     assert s["height"] == 0 or s["parent"] in shares, f"share {s['id']} has an unknown parent"
-best = branch(tips[0], 10**9)
+# Same tip, or (both nodes stop at the same moment) one node's last shares had not reached the other yet:
+# then one tip is an ancestor of the other, never on another branch.
+ids = [{x["id"] for x in branch(t, 10**9)} for t in tips]
+assert tips[0] == tips[1] or tips[0] in ids[1] or tips[1] in ids[0], f"the two pool nodes ended on different branches: {tips}"
+best = branch(tips[0] if tips[1] in ids[0] else tips[1], 10**9)
 assert best[-1]["height"] == 0, "the tip does not go back to the first share"
 
 checked = 0
