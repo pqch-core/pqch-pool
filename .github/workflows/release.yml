@@ -68,7 +68,7 @@ jobs:
           N="pqch-pool-${{ inputs.version }}"
           mkdir -p "stage/$N" out
           install -m 755 build/p2pool "stage/$N/pqch-pool"
-          cp COPYING "stage/$N/COPYING"
+          cp LICENSE "stage/$N/COPYING"
           cp deploy/LEIA-ME.txt "stage/$N/LEIA-ME.txt"
           tar -C stage --owner=0 --group=0 --numeric-owner --sort=name --mtime="@$(git log -1 --format=%ct)" \
             -czf "out/$N-x86_64-linux-gnu.tar.gz" "$N"
@@ -111,8 +111,8 @@ jobs:
         shell: bash
         run: |
           build/Release/p2pool.exe --help | grep -q -- "--pqch-miner"
-          # nothing listens on this port: the miner must keep retrying, not crash, and stop when told
-          build/Release/p2pool.exe --pqch-miner 127.0.0.1:9 pqct1pjmsknlc73kmcqw87nadat9xhvpwgu48x3pagweqqa8ffl3ssc7gq06rc6z --seconds 12 | tee miner.out
+          # nothing listens on this port: the miner must keep retrying, not crash, and stop when told (warnings go to stderr)
+          build/Release/p2pool.exe --pqch-miner 127.0.0.1:9 pqct1pjmsknlc73kmcqw87nadat9xhvpwgu48x3pagweqqa8ffl3ssc7gq06rc6z --seconds 12 2>&1 | tee miner.out
           grep -q "cannot connect to the pool" miner.out
       - name: Package
         shell: bash
@@ -120,7 +120,7 @@ jobs:
           N="pqch-pool-${{ inputs.version }}"
           mkdir -p "stage/$N" out
           cp build/Release/p2pool.exe "stage/$N/pqch-pool.exe"
-          cp COPYING "stage/$N/COPYING.txt"
+          cp LICENSE "stage/$N/COPYING.txt"
           cp deploy/LEIA-ME.txt "stage/$N/LEIA-ME.txt"
           (cd stage && 7z a -tzip "../out/$N-win64.zip" "$N")
           7z l "out/$N-win64.zip"
