@@ -15,6 +15,7 @@
 #
 # Com --stratum-lan 37889: o nó serve também mineradores sem nó (pqch-pool --pqch-miner, fase C) na porta indicada;
 #   a firewall (se a ufw estiver ativa) só a abre às redes privadas (192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12).
+# Com --threads 0: nó sem mineradores (só a rede do pool e o stratum), para uma VPS com CPU limitada por créditos.
 # Com --stratum-publico 37889: o mesmo, aberto a qualquer endereço (para a âncora). O nó limita cada endereço
 #   (8 ligações, 20 ligações novas por minuto, recusa durante 10 minutos quem não cumprir o protocolo) e verifica
 #   no máximo 10 partilhas por segundo.
@@ -57,7 +58,9 @@ done
 [[ $EUID -eq 0 ]] || { echo "correr com sudo"; exit 1; }
 [[ -n "$NODE_USER" && -n "$DATADIR" ]] || { echo "faltam --user e --datadir (ver o início do script)"; exit 1; }
 id "$NODE_USER" >/dev/null || exit 1
-[[ "$THREADS" =~ ^[0-9]+$ ]] && (( THREADS >= 1 && THREADS <= 64 )) || { echo "--threads entre 1 e 64"; exit 1; }
+[[ "$THREADS" =~ ^[0-9]+$ ]] && (( THREADS <= 64 )) || { echo "--threads entre 0 e 64"; exit 1; }
+(( THREADS || LISTEN || ${#PEERS[@]} )) || { echo "--threads 0 é um nó sem mineradores: precisa de --listen ou --peer"; exit 1; }
+(( THREADS )) || FAST=""   # sem mineradores, o modo rápido só gastava 2 GB
 (( LISTEN || ${#PEERS[@]} )) || { echo "indique --listen e/ou pelo menos um --peer"; exit 1; }
 [[ -z "$STRATUM_PORT" || ( "$STRATUM_PORT" =~ ^[0-9]+$ && "$STRATUM_PORT" -ge 1024 && "$STRATUM_PORT" -le 65535 && "$STRATUM_PORT" != "$POOL_PORT" ) ]] || { echo "--stratum-lan: porta entre 1024 e 65535, diferente da $POOL_PORT"; exit 1; }
 (( THREADS <= $(nproc) )) || { echo "--threads $THREADS é mais do que os $(nproc) processadores desta máquina"; exit 1; }
@@ -118,6 +121,7 @@ sudo -u "$NODE_USER" /usr/local/bin/pqch-pool --pqchd-check 127.0.0.1:$RPC_PORT 
 
 echo "== 3/4 Serviço pqch-pool-testnet"
 MINERS=$(printf "%s," $(for _ in $(seq 1 "$THREADS"); do echo "$ADDR"; done)); MINERS=${MINERS%,}
+[[ -n "$MINERS" ]] || MINERS="-"   # --threads 0: só retransmite partilhas e serve o stratum (a âncora)
 NETOPTS=""
 (( LISTEN )) && NETOPTS="--p2p-port $POOL_PORT"
 for p in "${PEERS[@]}"; do NETOPTS="$NETOPTS --peer $p"; done
