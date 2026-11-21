@@ -67,6 +67,12 @@ typedef std::vector<std::pair<std::vector<uint8_t>, uint64_t>> ShareQueue; // (s
 
 struct Pool : public P2PHandler, public StratumHandler
 {
+	Pool() = default;
+	Pool(const Pool&) = delete;
+	Pool(Pool&&) = delete;
+	Pool& operator=(const Pool&) = delete;
+	Pool& operator=(Pool&&) = delete;
+
 	PoolOptions opt;
 	Network net = Network::REGTEST;
 	std::vector<std::vector<uint8_t>> miner_scripts;

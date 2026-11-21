@@ -42,6 +42,12 @@ constexpr size_t MAX_LINE = 4096;
 
 struct Miner
 {
+	Miner() = default;
+	Miner(const Miner&) = delete;
+	Miner(Miner&&) = delete;
+	Miner& operator=(const Miner&) = delete;
+	Miner& operator=(Miner&&) = delete;
+
 	MinerOptions opt;
 	uv_loop_t* loop = nullptr;
 

@@ -23,7 +23,7 @@
 #include "common.h"
 
 struct randomx_cache;
-struct randomx_vm;
+class randomx_vm;
 struct randomx_dataset;
 
 namespace p2pool {
