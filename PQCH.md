@@ -13,7 +13,7 @@ Status: **phase A done** (20 Nov 2026): one pool node on regtest finds PQCH bloc
 | --- | --- | --- |
 | A | Fork, main chain: block template, coinbase, proof of work and block submission with `pqchd`; one pool node in regtest | **done** |
 | B | Pool network: share chain between nodes, PPLNS, PQCH parameters | done (regtest and testnet, 20 Nov 2026) |
-| C | Miner with stratum | code and regtest test done; testnet next |
+| C | Miner with stratum | done (regtest and testnet, 21 Nov 2026) |
 | D | One-click application (Windows, Linux) | planned |
 | E | Tests with outside miners, audit scope | planned |
 
@@ -100,5 +100,10 @@ Test: `tests/pqch/regtest_stratum.sh` (also in CI): a pool node with one built-i
 the stand-alone miner with another address; the miner's shares are accepted, both addresses have shares in the
 chain, every block passes `deploy/verificar_pool_testnet.py` and the stratum miner is paid; a login with a
 testnet address on regtest is refused.
+
+Testnet (21 Nov 2026): the home server, with no pool node, ran `--pqch-miner` (2 threads, light mode, 80 H/s)
+against the Kali node's stratum on the local network. After 90 minutes `deploy/verificar_pool_testnet.py` gave
+435 pool blocks among the last 500, all 435 with the exact PPLNS split, and the server's address paid in each
+recent block alongside the two pool nodes' addresses; the PPLNS window was full (2160 shares).
 
 The original P2Pool README follows in `README.md`.
