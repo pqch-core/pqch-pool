@@ -86,15 +86,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cli() { sudo -u "$NODE_USER" /usr/local/bin/pqch-cli -testnet -datadir="$DATADIR" "$@"; }
 
 echo "== 1/4 Compilar o pqch-pool"
-apt-get install -y -q --no-install-recommends build-essential cmake git libuv1-dev libzmq3-dev libcurl4-openssl-dev nasm >/dev/null
-git -C "$REPO" submodule update --init --depth 1 external/src/RandomX external/src/cppzmq external/src/libuv \
-	external/src/libzmq external/src/rapidjson external/src/robin-hood-hashing external/src/curl external/src/miniupnp >/dev/null
-git -C "$REPO" submodule update --init --depth 1 external/src/grpc >/dev/null
-git -C "$REPO/external/src/grpc" submodule update --init --depth 1 third_party/boringssl-with-bazel >/dev/null
-cmake -S "$REPO" -B "$REPO/build-testnet" -DWITH_GRPC=OFF -DWITH_MERGE_MINING_DONATION=OFF -DWITH_UPNP=OFF >/dev/null
-cmake --build "$REPO/build-testnet" -j"$(nproc)" >/dev/null
-install -m 0755 "$REPO/build-testnet/p2pool" /usr/local/bin/pqch-pool
-echo "pqch-pool $(git -C "$REPO" rev-parse --short HEAD) instalado"
+"$REPO/deploy/compilar.sh"
 
 echo "== 2/4 Morada e ligação ao pqchd"
 COOKIE=$(find "$DATADIR" -maxdepth 2 -name .cookie -path '*test*' | head -1)
