@@ -109,4 +109,14 @@ against the Kali node's stratum on the local network. After 90 minutes `deploy/v
 435 pool blocks among the last 500, all 435 with the exact PPLNS split, and the server's address paid in each
 recent block alongside the two pool nodes' addresses; the PPLNS window was full (2160 shares).
 
+## Releases (phase D)
+
+`.github/workflows/release.yml` (run by hand with the version; tick "release" for a draft): a Linux binary
+built with static libuv, libzmq and libcurl (needs only glibc), a Windows binary built with MSVC, the pqch tests
+on both, a smoke test of the miner on Windows, SHA256SUMS and a draft release. Cesar downloads the draft's
+files, checks them with SHA256SUMS, signs it with the PQCH release key (`gpg --homedir D:\gnupg-pqch
+--armor --detach-sign --local-user releases@pqch.org SHA256SUMS`), attaches SHA256SUMS.asc and publishes.
+The PQCH wallet then takes these files by version and SHA256 (`contrib/pqch/pqch-pool.sha256` in
+pqch-core/pqch) and ships the miner next to pqch-qt, which runs it for "Mining > Pool".
+
 The original P2Pool README follows in `README.md`.
