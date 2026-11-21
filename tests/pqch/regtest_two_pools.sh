@@ -10,7 +10,9 @@
 #   - each node received shares from the other;
 #   - every pool block in the main chain (as both pqchd nodes see it) pays exactly the PPLNS split of the
 #     share chain (weights = share difficulties, floor, remainder to the finder);
-#   - blocks found by A pay MB and blocks found by B pay MA: one pool, not two.
+#   - blocks found by A pay MB and blocks found by B pay MA: one pool, not two;
+#   - late node C (no miners of its own) serves a stratum miner (MC) that connects at once: C hands out no
+#     work until it has synced the share chain, so MC's shares extend the pool's chain, not a new one.
 # On regtest every share is also a block, so the two nodes sometimes find a block at the same height: the one
 # that loses ("inconclusive") is an orphan, not an error.
 set -euo pipefail
@@ -47,10 +49,16 @@ sleep 2
 PID_B=$!
 # pool node C: no miners, joins halfway through and has to fetch the shares it missed from A
 sleep $((RUN / 2))
+MC=$(a getnewaddress)
 "$POOL" --pqch-pool 127.0.0.1:$RA "$DA/regtest/.cookie" - --network regtest --share-time 5 --min-diff 20 \
-	--seconds $((RUN / 2 - 2)) --peer 127.0.0.1:$POOL_PORT --log "$DA/poolc.jsonl" > "$DA/poolc.out" 2>&1 &
+	--seconds $((RUN / 2 - 2)) --peer 127.0.0.1:$POOL_PORT --log "$DA/poolc.jsonl" --stratum 127.0.0.1:37892 > "$DA/poolc.out" 2>&1 &
 PID_C=$!
-wait $PID_A || true; wait $PID_B || true; wait $PID_C || true
+sleep 1
+"$POOL" --pqch-miner 127.0.0.1:37892 "$MC" --threads 1 --seconds $((RUN / 2 - 6)) > "$DA/minerc.out" 2>&1 &
+PID_MC=$!
+wait $PID_A || true; wait $PID_B || true; wait $PID_C || true; wait $PID_MC || true
+grep "pqch-miner:" "$DA/minerc.out" | sed 's/^/C stratum: /'
+grep -q "share chain synced" "$DA/poolc.out" || { echo "FAIL: node C never reported the share chain synced"; exit 1; }
 grep "pqch-pool:" "$DA/pool.out" | sed 's/^/A: /'; grep "pqch-pool:" "$DB/pool.out" | sed 's/^/B: /'
 grep "pqch-pool:" "$DA/poolc.out" | sed 's/^/C: /'
 
@@ -148,9 +156,13 @@ assert checked >= 2, f"too few blocks in the main chain: {checked}"
 assert late, "the late pool node has no tip"
 assert any(s["height"] == 0 for s in late_shares), "the late node did not fetch the chain back to its start"
 late_tip_height = shares[late.group(1)]["height"] if late.group(1) in shares else -1
+# the stratum miner on C mined only after C had synced: its shares extend the pool's chain (A and B got them)
+mc_shares = [x for x in late_shares if x["type"] == "share" and x.get("own")]
+assert all(x["height"] > 0 and x["id"] in shares for x in mc_shares), \
+    "a share of C's stratum miner is not on the pool's chain: " + str([(x["height"], x["id"] in shares) for x in mc_shares])
 assert late_tip_height >= best[0]["height"] - 2, f"the late node is behind: {late_tip_height} vs {best[0]['height']}"
 assert paid_by["A"].get(mb, 0) > 0 or paid_by["B"].get(ma, 0) > 0, f"no node paid the other node's miner: {paid_by}"
 print(f"regtest_two_pools: OK - {len(shares)} shares in one tree (tip height {best[0]['height']}), "
       f"received A {received[0]} / B {received[1]}, {checked} blocks in the main chain each = PPLNS of the shared "
-      f"chain, {orphans} orphans; late node C synced {len(late_shares)} shares, tip height {late_tip_height}; A's blocks paid {paid_by['A']}, B's blocks paid {paid_by['B']}")
+      f"chain, {orphans} orphans; late node C synced {len(late_shares)} shares, tip height {late_tip_height}, its stratum miner {len(mc_shares)} shares on the chain; A's blocks paid {paid_by['A']}, B's blocks paid {paid_by['B']}")
 EOF

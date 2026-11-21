@@ -83,6 +83,25 @@ struct Pool : public P2PHandler, public StratumHandler
 	unordered_map<hash, std::vector<uint8_t>> share_bytes; // serialized shares of the tree
 	std::map<hash, ShareQueue> pending;   // parent id -> shares waiting for it
 	size_t pending_count = 0;
+
+	// Syncing the share chain from the other nodes: no work is handed out meanwhile (built-in or stratum), or
+	// the miners would mine on a partial chain (at the minimum difficulty, on a branch nobody else follows).
+	// Syncing = waiting for parents of received shares (with progress in the last SYNC_STALL_SECONDS), or, at
+	// start with --peer, an empty chain for up to SYNC_START_SECONDS.
+	static constexpr uint64_t SYNC_START_SECONDS = 60;
+	static constexpr uint64_t SYNC_STALL_SECONDS = 60;
+	bool wait_for_peers = false;
+	uint64_t started_at = 0;
+	uint64_t last_sync_progress = 0;
+	bool was_syncing = false;
+	uv_timer_t sync_timer{};
+
+	bool syncing() const
+	{
+		const uint64_t now = seconds_since_epoch();
+		if (pending_count && (now < last_sync_progress + SYNC_STALL_SECONDS)) return true;
+		return wait_for_peers && (chain.size() == 0) && (now < started_at + SYNC_START_SECONDS);
+	}
 	std::set<hash> requested;             // parents asked for
 	std::map<uint64_t, hash> seeds;       // RandomX key per seed height
 	std::set<uint64_t> seeds_requested;
@@ -131,6 +150,16 @@ struct Pool : public P2PHandler, public StratumHandler
 	{
 		if (!have_template) return;
 		++work_generation;
+		if (syncing()) {
+			if (!was_syncing) LOGINFO(1, "syncing the share chain from the other pool nodes: mining waits");
+			was_syncing = true;
+			works.clear();
+			current_generation = work_generation;
+			for (auto& kv : sessions) kv.second.job_id.clear(); // their old jobs are stale now
+			return;
+		}
+		if (was_syncing) LOGINFO(1, "share chain synced (" << chain.size() << " shares): mining");
+		was_syncing = false;
 		works.resize(miner_scripts.size());
 		for (size_t i = 0; i < miner_scripts.size(); ++i) {
 			if (!make_work(chain, tmpl, miner_scripts[i], i, work_generation, static_cast<uint64_t>(time(nullptr)), works[i])) {
@@ -144,7 +173,7 @@ struct Pool : public P2PHandler, public StratumHandler
 	// lock held: build the work of a stratum miner and send it its new job
 	void send_stratum_job(uint64_t session, MinerSession& m)
 	{
-		if (!have_template || !stratum) return;
+		if (!have_template || !stratum || syncing()) return;
 		const uint64_t extra_nonce = (1ULL << 40) | session; // the built-in miners use 0, 1, 2, ...
 		if (!make_work(chain, tmpl, m.script, extra_nonce, work_generation, static_cast<uint64_t>(time(nullptr)), m.work)) {
 			LOGERR(0, "could not build the work for stratum session " << session);
@@ -200,7 +229,7 @@ struct Pool : public P2PHandler, public StratumHandler
 			auto it = sessions.find(session);
 			if (it == sessions.end()) return "not logged in";
 			MinerSession& m = it->second;
-			if (!have_template || m.job_id.empty() || (job_id != m.job_id)) return "stale job";
+			if (!have_template || m.job_id.empty() || (job_id != m.job_id) || syncing()) return "stale job";
 			const uint64_t now = seconds_since_epoch();
 			if (now != verify_second) { verify_second = now; verify_count = 0; }
 			if (++verify_count > MAX_VERIFY_PER_SECOND) return "node busy";
@@ -372,6 +401,7 @@ struct Pool : public P2PHandler, public StratumHandler
 				if (pending_count < MAX_PENDING) {
 					pending[s.parent].emplace_back(bytes, peer);
 					++pending_count;
+					last_sync_progress = seconds_since_epoch();
 				}
 				if (requested.insert(s.parent).second && p2p) p2p->send(peer, MsgType::GET_SHARE, s.parent.h, HASH_SIZE);
 				return true;
@@ -406,6 +436,7 @@ struct Pool : public P2PHandler, public StratumHandler
 				return false;
 			}
 			++shares_received;
+			last_sync_progress = seconds_since_epoch();
 			share_bytes[s.id] = bytes;
 			const bool is_block = have_template && check_pow(s.pow_hash, tmpl.target);
 			log_share(s, is_block, false);
@@ -609,6 +640,20 @@ int run_pool(const PoolOptions& opt)
 	pool.client = &client;
 	if (!client.start(loop)) return 1;
 
+	{
+		Pool::Guard g(pool.lock);
+		pool.wait_for_peers = !opt.peers.empty();
+		pool.started_at = seconds_since_epoch();
+	}
+	// the end of syncing may come from a timeout, not from a share: check every few seconds
+	uv_timer_init(loop, &pool.sync_timer);
+	pool.sync_timer.data = &pool;
+	uv_timer_start(&pool.sync_timer, [](uv_timer_t* t) {
+		Pool* pl = static_cast<Pool*>(t->data);
+		Pool::Guard g(pl->lock);
+		if (pl->was_syncing && pl->have_template && !pl->syncing()) pl->rebuild_works();
+	}, 5000, 5000);
+
 	P2P* p2p = nullptr;
 	if (opt.p2p_port || !opt.peers.empty()) {
 		p2p = new P2P(loop, pool.net, opt.p2p_port, opt.peers, &pool);
@@ -640,6 +685,8 @@ int run_pool(const PoolOptions& opt)
 			pl->client->stop();
 			if (pl->p2p) pl->p2p->stop();
 			if (pl->stratum) pl->stratum->stop();
+			uv_timer_stop(&pl->sync_timer);
+			uv_close(reinterpret_cast<uv_handle_t*>(&pl->sync_timer), nullptr);
 			uv_close(reinterpret_cast<uv_handle_t*>(t), nullptr);
 			uv_timer_t* closer = new uv_timer_t{};
 			uv_timer_init(t->loop, closer);
