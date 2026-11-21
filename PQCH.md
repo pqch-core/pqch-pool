@@ -13,7 +13,7 @@ Status: **phase A done** (20 Nov 2026): one pool node on regtest finds PQCH bloc
 | --- | --- | --- |
 | A | Fork, main chain: block template, coinbase, proof of work and block submission with `pqchd`; one pool node in regtest | **done** |
 | B | Pool network: share chain between nodes, PPLNS, PQCH parameters | done (regtest and testnet, 20 Nov 2026) |
-| C | Miner with stratum | planned |
+| C | Miner with stratum | code and regtest test done; testnet next |
 | D | One-click application (Windows, Linux) | planned |
 | E | Tests with outside miners, audit scope | planned |
 
@@ -61,8 +61,10 @@ Commands (development):
 p2pool --pqchd-check 127.0.0.1:<rpcport> <datadir>/<network>/.cookie        # can the pool work with this node?
 p2pool --pqch-pool 127.0.0.1:<rpcport> <cookie> <P2MR address>,<P2MR address> \
        [--share-time 10] [--min-diff 100000] [--seconds 0] [--log pqch-pool.jsonl] \
-       [--p2p-port 37890] [--peer <ip:port>]... [--network main|testnet|regtest]
+       [--p2p-port 37890] [--peer <ip:port>]... [--network main|testnet|regtest] [--fast] [--stratum <ip:port>]
 # "-" instead of the addresses: a node without miners (needs --network)
+p2pool --pqch-miner <pool node ip>:<stratum port> <P2MR address> [--threads N] [--fast] [--seconds N]
+# phase C: a miner without a node; every share it finds is paid to its address by PPLNS
 ```
 
 Acceptance tests against a real `pqchd` (also in CI, job "Pool against pqchd"):
@@ -82,5 +84,21 @@ that chain. Met on 20 Nov 2026 (pqchd 0.3.1, pqch-pool 51ebbb6): within 15 minut
 chain of 150 shares (difficulty retargeted from 1000 to ~50000 at one share per 10 s) and found testnet blocks
 21777-21782, found by both nodes, each paying both miners. `deploy/verificar_pool_testnet.py`, independent of
 the pool's code, gave 6 of 6 blocks with the exact PPLNS split, run on each node with its own share log.
+
+## Phase C: stratum
+
+`src/pqch_stratum.*` (protocol and server) and `src/pqch_miner.*` (the miner). One JSON object per line, in the
+style of the Monero stratum: `login` with a P2MR address, `job` pushed by the node (the 80-byte header with the
+nonce zeroed, the share difficulty, the RandomX key), `submit` with a 32-bit nonce, `keepalived`. Each miner gets
+its own work: its address in the coinbase and its own extra nonce, so its shares are paid to it by PPLNS like the
+built-in miners'. The node recomputes every submitted hash (it never trusts the miner's), refuses addresses of
+another network, and limits each connection (4 KiB lines, 20 messages/s, 10 invalid shares, 256 miners, 10
+minutes idle). The stratum is meant for the local network for now (`deploy/instalar_pool_testnet.sh
+--stratum-lan 37889` opens it only to private networks); per-address limits come before it is public (phase E).
+
+Test: `tests/pqch/regtest_stratum.sh` (also in CI): a pool node with one built-in miner and a stratum port, and
+the stand-alone miner with another address; the miner's shares are accepted, both addresses have shares in the
+chain, every block passes `deploy/verificar_pool_testnet.py` and the stratum miner is paid; a login with a
+testnet address on regtest is refused.
 
 The original P2Pool README follows in `README.md`.

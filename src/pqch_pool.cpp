@@ -28,6 +28,7 @@
 #include "pqch_share.h"
 #include "pqch_p2p.h"
 #include "pqch_pow.h"
+#include "pqch_stratum.h"
 #include "json_rpc_request.h"
 #include <atomic>
 #include <fstream>
@@ -64,7 +65,7 @@ constexpr size_t MAX_PENDING = 8192; // shares waiting for their parent
 
 typedef std::vector<std::pair<std::vector<uint8_t>, uint64_t>> ShareQueue; // (serialized share, peer)
 
-struct Pool : public P2PHandler
+struct Pool : public P2PHandler, public StratumHandler
 {
 	PoolOptions opt;
 	Network net = Network::REGTEST;
@@ -94,8 +95,20 @@ struct Pool : public P2PHandler
 	std::atomic<bool> stop{ false };
 	std::atomic<uint64_t> hashes{ 0 };
 
+	// stratum miners (phase C): each has its own work (its address in the coinbase, its own extra nonce)
+	struct MinerSession
+	{
+		std::vector<uint8_t> script;
+		Work work;
+		std::string job_id;               // empty: no work sent yet
+		uint32_t bad_submits = 0;
+	};
+	std::map<uint64_t, MinerSession> sessions;
+	static constexpr uint32_t MAX_BAD_SUBMITS = 10;
+
 	PqchdClient* client = nullptr;
 	P2P* p2p = nullptr;
+	StratumServer* stratum = nullptr;
 	uv_loop_t* loop = nullptr;
 
 	typedef std::lock_guard<std::recursive_mutex> Guard;
@@ -120,6 +133,83 @@ struct Pool : public P2PHandler
 			}
 		}
 		current_generation = work_generation;
+		for (auto& kv : sessions) send_stratum_job(kv.first, kv.second);
+	}
+
+	// lock held: build the work of a stratum miner and send it its new job
+	void send_stratum_job(uint64_t session, MinerSession& m)
+	{
+		if (!have_template || !stratum) return;
+		const uint64_t extra_nonce = (1ULL << 40) | session; // the built-in miners use 0, 1, 2, ...
+		if (!make_work(chain, tmpl, m.script, extra_nonce, work_generation, static_cast<uint64_t>(time(nullptr)), m.work)) {
+			LOGERR(0, "could not build the work for stratum session " << session);
+			return;
+		}
+		char id[40];
+		snprintf(id, sizeof(id), "%llx.%llx", static_cast<unsigned long long>(work_generation), static_cast<unsigned long long>(session));
+		m.job_id = id;
+		StratumJob job;
+		job.job_id = m.job_id;
+		make_header(m.work.tmpl, m.work.merkle_root, static_cast<uint32_t>(m.work.timestamp), 0, job.blob);
+		job.difficulty = m.work.share_difficulty;
+		job.seed_hash = m.work.tmpl.seed_hash;
+		job.height = m.work.tmpl.height;
+		std::string* json = new std::string(stratum_job_json(job));
+		CallOnLoop(loop, [this, session, json]() {
+			if (stratum) stratum->send_job(session, *json);
+			delete json;
+		});
+	}
+
+	// ---------------------------------------------------------------- stratum miners (loop thread)
+
+	bool on_login(uint64_t session, const std::string& addr, std::string& error) override
+	{
+		std::vector<uint8_t> script;
+		if (!p2mr_script_from_address(addr, net, script)) {
+			error = "not a P2MR address of this network";
+			return false;
+		}
+		Guard g(lock);
+		MinerSession& m = sessions[session];
+		m.script = script;
+		LOGINFO(3, "stratum miner " << session << " pays to " << addr);
+		send_stratum_job(session, m);
+		return true;
+	}
+
+	void on_disconnect(uint64_t session) override
+	{
+		Guard g(lock);
+		sessions.erase(session);
+	}
+
+	std::string on_submit(uint64_t session, const std::string& job_id, uint32_t nonce) override
+	{
+		Work w;
+		uint8_t header[HEADER_SIZE];
+		hash pow;
+		{
+			// under one lock, so that the work cannot change between the check and adding the share
+			Guard g(lock);
+			auto it = sessions.find(session);
+			if (it == sessions.end()) return "not logged in";
+			MinerSession& m = it->second;
+			if (!have_template || m.job_id.empty() || (job_id != m.job_id)) return "stale job";
+			w = m.work;
+			make_header(w.tmpl, w.merkle_root, static_cast<uint32_t>(w.timestamp), nonce, header);
+			// never trust the miner's hash: recompute it
+			if (!net_hasher.set_key(w.tmpl.seed_hash)) return "node busy";
+			pow = net_hasher.calculate(header, HEADER_SIZE);
+			if (!difficulty_type(w.share_difficulty).check_pow(pow)) {
+				if (++m.bad_submits > MAX_BAD_SUBMITS) {
+					CallOnLoop(loop, [this, session]() { if (stratum) stratum->disconnect(session, "too many invalid shares"); });
+				}
+				return "low difficulty share";
+			}
+			const std::string error = on_found_share(w, work_generation, header, pow, "stratum miner " + std::to_string(session));
+			return error.empty() ? "OK" : error;
+		}
 	}
 
 	void log_share(const Share& s, bool is_block, bool own)
@@ -149,24 +239,36 @@ struct Pool : public P2PHandler
 
 	void on_own_share(size_t miner, uint64_t generation, const uint8_t (&header)[HEADER_SIZE], const hash& pow)
 	{
+		Work w;
+		{
+			Guard g(lock);
+			if (generation != work_generation) return; // stale: the work changed meanwhile
+			w = works[miner];
+		}
+		on_found_share(w, generation, header, pow, "miner " + std::to_string(miner));
+	}
+
+	// A share found on work `w` (built-in or stratum miner): add it, broadcast it, submit it if it is a block.
+	// Returns "" or why the share was not added.
+	std::string on_found_share(const Work& w, uint64_t generation, const uint8_t (&header)[HEADER_SIZE], const hash& pow, const std::string& who)
+	{
 		std::vector<uint8_t> block, msg;
 		std::string json;
 		{
 			Guard g(lock);
-			if (generation != work_generation) return; // stale: the work changed meanwhile
-			const Work& w = works[miner];
+			if (generation != work_generation) return "stale job"; // the work changed meanwhile
 			const Share s = make_share(w, header, pow);
 			std::string error;
 			if (!chain.add(s, error)) {
 				LOGWARN(0, "own share refused: " << error);
-				return;
+				return error;
 			}
 			++shares_found;
 			msg = serialize(make_share_message(w, s));
 			share_bytes[s.id] = msg;
 			const bool is_block = check_pow(pow, w.tmpl.target);
 			log_share(s, is_block, true);
-			LOGINFO(3, "share " << s.height << " by miner " << miner << ", difficulty " << s.difficulty << (is_block ? " - a PQCH block!" : ""));
+			LOGINFO(3, "share " << s.height << " by " << who << ", difficulty " << s.difficulty << (is_block ? " - a PQCH block!" : ""));
 
 			if (is_block) {
 				++blocks_found;
@@ -211,6 +313,7 @@ struct Pool : public P2PHandler
 			});
 			delete b;
 		});
+		return std::string();
 	}
 
 	// ---------------------------------------------------------------- shares from other nodes (loop thread)
@@ -470,7 +573,7 @@ int run_pool(const PoolOptions& opt)
 		}
 		pool.miner_scripts.push_back(script);
 	}
-	if (pool.miner_scripts.empty() && opt.peers.empty() && !opt.p2p_port) {
+	if (pool.miner_scripts.empty() && opt.peers.empty() && !opt.p2p_port && opt.stratum.empty()) {
 		fprintf(stderr, "no miner addresses and no pool network: nothing to do\n");
 		return 1;
 	}
@@ -505,6 +608,14 @@ int run_pool(const PoolOptions& opt)
 		pool.p2p = p2p;
 	}
 
+	StratumServer* stratum = nullptr;
+	if (!opt.stratum.empty()) {
+		stratum = new StratumServer(loop, opt.stratum, &pool);
+		if (!stratum->start()) return 1;
+		Pool::Guard g(pool.lock);
+		pool.stratum = stratum;
+	}
+
 	std::vector<std::thread> threads;
 	for (size_t i = 0; i < pool.miner_scripts.size(); ++i) {
 		threads.emplace_back([&pool, i]() { pool.miner_thread(i); });
@@ -520,6 +631,7 @@ int run_pool(const PoolOptions& opt)
 			pl->stop = true;
 			pl->client->stop();
 			if (pl->p2p) pl->p2p->stop();
+			if (pl->stratum) pl->stratum->stop();
 			uv_close(reinterpret_cast<uv_handle_t*>(t), nullptr);
 			uv_timer_t* closer = new uv_timer_t{};
 			uv_timer_init(t->loop, closer);
@@ -533,6 +645,11 @@ int run_pool(const PoolOptions& opt)
 	uv_run(loop, UV_RUN_DEFAULT);
 	for (std::thread& t : threads) t.join();
 	delete p2p;
+	{
+		Pool::Guard g(pool.lock);
+		pool.stratum = nullptr;
+	}
+	delete stratum;
 
 	if (own_tracker) {
 		delete bkg_jobs_tracker;

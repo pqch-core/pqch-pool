@@ -34,10 +34,11 @@ struct PoolOptions
 	std::vector<std::string> peers;       // other pool nodes to connect to, "ip:port"
 	std::string network;                  // main | testnet | regtest (needed only without miners)
 	bool fast = false;                    // RandomX fast mode for the built-in miners (about 2 GiB of memory)
+	std::string stratum;                  // "ip:port": serve miners over stratum (phase C); empty = off
 };
 
 // `pqch-pool --pqch-pool <host:port> <cookie|user:password> <addr,addr,...|-> [--share-time S] [--min-diff D]
-//  [--seconds N] [--log FILE] [--p2p-port P] [--peer ip:port]... [--network N]`. Exit 0 if no block was rejected.
+//  [--seconds N] [--log FILE] [--p2p-port P] [--peer ip:port]... [--network N] [--fast] [--stratum ip:port]`. Exit 0 if no block was rejected.
 int run_pool(const PoolOptions& opt);
 
 } // namespace pqch

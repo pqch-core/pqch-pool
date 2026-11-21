@@ -119,6 +119,8 @@ set(HEADERS
 	src/pqch_share.h
 	src/pqch_p2p.h
 	src/pqch_pool.h
+	src/pqch_stratum.h
+	src/pqch_miner.h
 	src/keccak.h
 	src/log.h
 	src/mempool.h
@@ -163,6 +165,8 @@ set(SOURCES
 	src/pqch_share.cpp
 	src/pqch_p2p.cpp
 	src/pqch_pool.cpp
+	src/pqch_stratum.cpp
+	src/pqch_miner.cpp
 	src/keccak.cpp
 	src/log.cpp
 	src/main.cpp

@@ -4,7 +4,7 @@
 # Instala um nó do pool PQCH (pqch-pool) na testnet, ao lado de um pqchd que já esteja a correr na mesma máquina.
 #
 #   sudo deploy/instalar_pool_testnet.sh --user <utilizador do pqchd> --datadir <pasta de dados do pqchd> \
-#        [--wallet <carteira> | --morada <pqct1p...>] [--threads N] [--fast] [--listen] [--peer <ip>:37890]... [--substituir-minerador]
+#        [--wallet <carteira> | --morada <pqct1p...>] [--threads N] [--fast] [--listen] [--peer <ip>:37890]... [--substituir-minerador] [--stratum-lan PORTA]
 #
 #   âncora:  sudo deploy/instalar_pool_testnet.sh --user pqch --datadir /home/pqch/.pqch --threads 1 --listen
 #   server:  sudo deploy/instalar_pool_testnet.sh --user pqch-minerador --datadir /var/lib/pqch-minerador \
@@ -13,6 +13,8 @@
 #            sudo deploy/instalar_pool_testnet.sh --user pqch-minerador --datadir /var/lib/pqch-minerador \
 #                 --threads 4 --fast --peer 187.127.89.83:37890 --substituir-minerador
 #
+# Com --stratum-lan 37889: o nó serve também mineradores sem nó (pqch-pool --pqch-miner, fase C) na porta indicada;
+#   a firewall (se a ufw estiver ativa) só a abre às redes privadas (192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12).
 # Nó sem carteira (disablewallet=1): indique a morada das recompensas com --morada pqct1p...
 #
 # O que faz, por esta ordem:
@@ -32,7 +34,7 @@ set -euo pipefail
 
 POOL_PORT=37890
 RPC_PORT=39332          # testnet
-NODE_USER=""; DATADIR=""; WALLET=""; MORADA=""; THREADS=1; FAST=""; LISTEN=0; PEERS=(); SUBST=0
+STRATUM_PORT=""; NODE_USER=""; DATADIR=""; WALLET=""; MORADA=""; THREADS=1; FAST=""; LISTEN=0; PEERS=(); SUBST=0
 while (( $# )); do
 	case "$1" in
 		--user) NODE_USER=$2; shift 2 ;;
@@ -44,6 +46,7 @@ while (( $# )); do
 		--listen) LISTEN=1; shift ;;
 		--peer) PEERS+=("$2"); shift 2 ;;
 		--substituir-minerador) SUBST=1; shift ;;
+		--stratum-lan) STRATUM_PORT=$2; shift 2 ;;
 		*) echo "opção desconhecida: $1"; exit 1 ;;
 	esac
 done
@@ -52,6 +55,7 @@ done
 id "$NODE_USER" >/dev/null || exit 1
 [[ "$THREADS" =~ ^[0-9]+$ ]] && (( THREADS >= 1 && THREADS <= 64 )) || { echo "--threads entre 1 e 64"; exit 1; }
 (( LISTEN || ${#PEERS[@]} )) || { echo "indique --listen e/ou pelo menos um --peer"; exit 1; }
+[[ -z "$STRATUM_PORT" || ( "$STRATUM_PORT" =~ ^[0-9]+$ && "$STRATUM_PORT" -ge 1024 && "$STRATUM_PORT" -le 65535 && "$STRATUM_PORT" != "$POOL_PORT" ) ]] || { echo "--stratum-lan: porta entre 1024 e 65535, diferente da $POOL_PORT"; exit 1; }
 (( THREADS <= $(nproc) )) || { echo "--threads $THREADS é mais do que os $(nproc) processadores desta máquina"; exit 1; }
 STATE=/var/lib/pqch-pool-testnet
 if (( SUBST )); then
@@ -121,6 +125,7 @@ MINERS=$(printf "%s," $(for _ in $(seq 1 "$THREADS"); do echo "$ADDR"; done)); M
 NETOPTS=""
 (( LISTEN )) && NETOPTS="--p2p-port $POOL_PORT"
 for p in "${PEERS[@]}"; do NETOPTS="$NETOPTS --peer $p"; done
+[[ -n "$STRATUM_PORT" ]] && NETOPTS="$NETOPTS --stratum 0.0.0.0:$STRATUM_PORT"
 cat > /etc/systemd/system/pqch-pool-testnet.service <<UNIT
 [Unit]
 Description=Nó do pool PQCH (testnet)
@@ -156,7 +161,17 @@ if (( LISTEN )); then
 		echo "ufw não está ativa: abra a porta $POOL_PORT/tcp na firewall desta máquina"
 	fi
 else
-	echo "nada a abrir (este nó liga-se para fora)"
+	echo "porta do pool: nada a abrir (este nó liga-se para fora)"
+fi
+if [[ -n "$STRATUM_PORT" ]]; then
+	if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+		for net in 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12; do
+			ufw allow from $net to any port "$STRATUM_PORT" proto tcp comment 'pqch-pool stratum (LAN)' >/dev/null
+		done
+		echo "stratum: porta $STRATUM_PORT/tcp aberta só às redes privadas"
+	else
+		echo "stratum: porta $STRATUM_PORT/tcp (ufw não está ativa; não a reencaminhe no router)"
+	fi
 fi
 sleep 5
 systemctl --no-pager --lines=5 status pqch-pool-testnet | sed -n '1,4p'

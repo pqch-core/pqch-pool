@@ -93,3 +93,5 @@ jobs:
         run: tests/pqch/regtest_pool.sh pqch/build/bin build/p2pool 90
       - name: Two pool nodes form one pool; a late node syncs (phase B, regtest)
         run: tests/pqch/regtest_two_pools.sh pqch/build/bin build/p2pool 120
+      - name: Stratum miner without a node (phase C)
+        run: tests/pqch/regtest_stratum.sh pqch/build/bin build/p2pool 90

@@ -23,6 +23,7 @@
 #include "thread_pool.h"
 #include "pqchd_client.h"
 #include "pqch_pool.h"
+#include "pqch_miner.h"
 #include <curl/curl.h>
 
 #ifdef WITH_GRPC
@@ -126,6 +127,7 @@ void p2pool_usage()
 		"--pqch-pool host:port cookie|user:password addr,addr,...  PQCH (phase A): one pool node, one built-in miner per address\n"
 		"                          [--share-time S] [--min-diff D] [--seconds N] [--log FILE]\n"
 		"                          [--p2p-port P] [--peer ip:port]... [--network main|testnet|regtest] [--fast]\n"
+		"--pqch-miner ip:port address [--threads N] [--fast] [--seconds N]  PQCH (phase C): mine on a pool node's stratum\n"
 		"--pqchd-mine-test host:port cookie|user:password addr:weight,...  PQCH (regtest): mine one block paying these addresses, then exit\n"
 		"--help                    Show this help message\n\n"
 		"Example command line:\n\n"
@@ -303,6 +305,8 @@ int main(int argc, char* argv[])
 	const char* pqchd_check_credentials = nullptr;
 	const char* pqchd_mine_spec = nullptr;
 	bool run_pqch_pool = false;
+	bool run_pqch_miner = false;
+	p2pool::pqch::MinerOptions pqch_miner_options;
 	p2pool::pqch::PoolOptions pqch_pool_options;
 
 	for (int i = 1; i < argc; ++i) {
@@ -348,12 +352,28 @@ int main(int argc, char* argv[])
 			if (!strcmp(argv[i], "--p2p-port")) { pqch_pool_options.p2p_port = static_cast<uint16_t>(strtoul(argv[++i], nullptr, 10)); continue; }
 			if (!strcmp(argv[i], "--peer")) { pqch_pool_options.peers.push_back(argv[++i]); continue; }
 			if (!strcmp(argv[i], "--network")) { pqch_pool_options.network = argv[++i]; continue; }
+			if (!strcmp(argv[i], "--stratum")) { pqch_pool_options.stratum = argv[++i]; continue; }
 		}
 		if (run_pqch_pool && !strcmp(argv[i], "--fast")) {
 			pqch_pool_options.fast = true;
 			continue;
 		}
 
+		if (!strcmp(argv[i], "--pqch-miner") && (i + 2 < argc)) {
+			pqch_miner_options.pool = argv[i + 1];
+			pqch_miner_options.address = argv[i + 2];
+			run_pqch_miner = true;
+			i += 2;
+			continue;
+		}
+		if (run_pqch_miner && (i + 1 < argc)) {
+			if (!strcmp(argv[i], "--threads")) { pqch_miner_options.threads = static_cast<unsigned>(strtoul(argv[++i], nullptr, 10)); continue; }
+			if (!strcmp(argv[i], "--seconds")) { pqch_miner_options.seconds = strtoull(argv[++i], nullptr, 10); continue; }
+		}
+		if (run_pqch_miner && !strcmp(argv[i], "--fast")) {
+			pqch_miner_options.fast = true;
+			continue;
+		}
 		if (!strcmp(argv[i], "--pqchd-mine-test") && (i + 3 < argc)) {
 			pqchd_check_host = argv[i + 1];
 			pqchd_check_credentials = argv[i + 2];
@@ -408,6 +428,18 @@ int main(int argc, char* argv[])
 		result = p2pool::pqch::run_pool(pqch_pool_options);
 		p2pool::log::stop();
 		curl_global_cleanup();
+		p2pool::thread_pool_destroy();
+		uv_loop_close(uv_default_loop());
+		return result;
+	}
+
+	// PQCH phase C: a miner on a pool node's stratum
+	if (run_pqch_miner) {
+		p2pool::Params log_params(std::vector<std::vector<std::string>>{});
+		log_params.m_logFileEnabled = false;
+		p2pool::log::start(log_params);
+		result = p2pool::pqch::run_miner(pqch_miner_options);
+		p2pool::log::stop();
 		p2pool::thread_pool_destroy();
 		uv_loop_close(uv_default_loop());
 		return result;

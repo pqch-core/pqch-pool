@@ -65,7 +65,9 @@ for l in open('$d/pool.jsonl'):
     r=json.loads(l)
     if r['type']=='block': print(r['hash'])"
 done | sort -u | while read -r h; do
-	a getblock "$h" 2 | python3 -c "import sys,json; b=json.load(sys.stdin); print(json.dumps({'hash': b['hash'], 'confirmations': b['confirmations'], 'vout': b['tx'][0]['vout']}))"
+	# a block that lost a race on the other node ("inconclusive") may never reach node A: an orphan too
+	{ a getblock "$h" 2 2>/dev/null || echo '{"hash":"'"$h"'","confirmations":-1,"tx":[{"vout":[]}]}'; } |
+		python3 -c "import sys,json; b=json.load(sys.stdin); print(json.dumps({'hash': b['hash'], 'confirmations': b['confirmations'], 'vout': b['tx'][0]['vout']}))"
 done > "$DA/coinbases.jsonl"
 
 python3 - "$DA/pool.jsonl" "$DB/pool.jsonl" "$DA/coinbases.jsonl" "$MA" "$MB" "$DA/pool.out" "$DB/pool.out" "$DA/poolc.out" "$DA/poolc.jsonl" <<'EOF'
