@@ -87,11 +87,14 @@ struct Pool : public P2PHandler, public StratumHandler
 	// Syncing the share chain from the other nodes: no work is handed out meanwhile (built-in or stratum), or
 	// the miners would mine on a partial chain (at the minimum difficulty, on a branch nobody else follows).
 	// Syncing = waiting for parents of received shares (with progress in the last SYNC_STALL_SECONDS), or, at
-	// start with --peer, an empty chain for up to SYNC_START_SECONDS.
+	// start in a pool network (--peer or --p2p-port), an empty chain until a peer has had SYNC_PEER_SECONDS to send
+	// its tip (a new network: nobody has shares), for up to SYNC_START_SECONDS if no peer comes.
 	static constexpr uint64_t SYNC_START_SECONDS = 60;
 	static constexpr uint64_t SYNC_STALL_SECONDS = 60;
+	static constexpr uint64_t SYNC_PEER_SECONDS = 5;  // a peer that sent no share this long after hello has none
 	bool wait_for_peers = false;
 	uint64_t started_at = 0;
+	uint64_t first_peer_at = 0;
 	uint64_t last_sync_progress = 0;
 	bool was_syncing = false;
 	uv_timer_t sync_timer{};
@@ -100,7 +103,14 @@ struct Pool : public P2PHandler, public StratumHandler
 	{
 		const uint64_t now = seconds_since_epoch();
 		if (pending_count && (now < last_sync_progress + SYNC_STALL_SECONDS)) return true;
-		return wait_for_peers && (chain.size() == 0) && (now < started_at + SYNC_START_SECONDS);
+		if (!wait_for_peers || chain.size() || (now >= started_at + SYNC_START_SECONDS)) return false;
+		return !first_peer_at || (now < first_peer_at + SYNC_PEER_SECONDS); // empty chain: wait for a peer's tip
+	}
+
+	void on_peer_ready(uint64_t) override
+	{
+		Guard g(lock);
+		if (!first_peer_at) first_peer_at = seconds_since_epoch();
 	}
 	std::set<hash> requested;             // parents asked for
 	std::map<uint64_t, hash> seeds;       // RandomX key per seed height
@@ -642,7 +652,8 @@ int run_pool(const PoolOptions& opt)
 
 	{
 		Pool::Guard g(pool.lock);
-		pool.wait_for_peers = !opt.peers.empty();
+		// a node of a pool network (it connects to others, or others connect to it) waits for their chain
+		pool.wait_for_peers = !opt.peers.empty() || opt.p2p_port;
 		pool.started_at = seconds_since_epoch();
 	}
 	// the end of syncing may come from a timeout, not from a share: check every few seconds

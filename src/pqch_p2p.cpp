@@ -290,6 +290,7 @@ bool P2P::handle(Peer* p, MsgType type, const uint8_t* payload, size_t size)
 		}
 		p->hello_received = true;
 		send(p->id, MsgType::GET_TIP, nullptr, 0);
+		m_handler->on_peer_ready(p->id);
 		return true;
 
 	case MsgType::SHARE:

@@ -49,6 +49,8 @@ public:
 	virtual bool get_tip(std::vector<uint8_t>& out) = 0;
 	// The peer does not have share `id`.
 	virtual void on_not_found(const hash& id, uint64_t peer) = 0;
+	// a peer said hello (it has just been asked for its tip)
+	virtual void on_peer_ready(uint64_t /*peer*/) {}
 };
 
 class P2P
