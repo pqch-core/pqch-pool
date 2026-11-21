@@ -93,13 +93,16 @@ nonce zeroed, the share difficulty, the RandomX key), `submit` with a 32-bit non
 its own work: its address in the coinbase and its own extra nonce, so its shares are paid to it by PPLNS like the
 built-in miners'. The node recomputes every submitted hash (it never trusts the miner's), refuses addresses of
 another network, and limits each connection (4 KiB lines, 20 messages/s, 10 invalid shares, 256 miners, 10
-minutes idle). The stratum is meant for the local network for now (`deploy/instalar_pool_testnet.sh
---stratum-lan 37889` opens it only to private networks); per-address limits come before it is public (phase E).
+minutes idle) and each remote address: 8 connections at once, 20 new ones per minute, 30 s to log in, and an
+address that breaks the protocol (bad JSON, too many messages, 10 invalid shares) is refused for 10 minutes; the
+node verifies at most 10 submitted shares per second in total (a light-mode RandomX hash each). The installer
+opens it to private networks (`--stratum-lan 37889`) or to everyone (`--stratum-publico 37889`, the anchor).
 
 Test: `tests/pqch/regtest_stratum.sh` (also in CI): a pool node with one built-in miner and a stratum port, and
 the stand-alone miner with another address; the miner's shares are accepted, both addresses have shares in the
 chain, every block passes `deploy/verificar_pool_testnet.py` and the stratum miner is paid; a login with a
-testnet address on regtest is refused.
+testnet address on regtest is refused; a 9th connection from one address is refused, and so is an address
+that sent garbage.
 
 Testnet (21 Nov 2026): the home server, with no pool node, ran `--pqch-miner` (2 threads, light mode, 80 H/s)
 against the Kali node's stratum on the local network. After 90 minutes `deploy/verificar_pool_testnet.py` gave

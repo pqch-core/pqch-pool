@@ -9,7 +9,9 @@
 #   - the share chain has shares of both A and B;
 #   - every pool block was accepted and pays exactly the PPLNS split (deploy/verificar_pool_testnet.py,
 #     independent of the pool's code), and B, the stratum miner, was paid;
-#   - a login with an address of another network is refused.
+#   - a login with an address of another network is refused;
+#   - per-address limits: a 9th connection from one address is refused, and an address that sends garbage is
+#     refused for a while.
 set -euo pipefail
 
 BIN=${1:?pqchd directory}
@@ -30,7 +32,7 @@ A=$(cli getnewaddress); B=$(cli getnewaddress)
 START=$(cli getblockcount)
 
 "$POOL" --pqch-pool "127.0.0.1:$RPC_PORT" "$DIR/regtest/.cookie" "$A" --share-time 5 --min-diff 20 \
-	--seconds "$((SECONDS_TO_RUN + 10))" --log "$DIR/pool.jsonl" --stratum "127.0.0.1:$STRATUM_PORT" > "$DIR/pool.out" 2>&1 &
+	--seconds "$((SECONDS_TO_RUN + 30))" --log "$DIR/pool.jsonl" --stratum "127.0.0.1:$STRATUM_PORT" > "$DIR/pool.out" 2>&1 &
 POOL_PID=$!
 sleep 3
 
@@ -42,6 +44,35 @@ grep -q "refused the login" "$DIR/bad.out" || { echo "FAIL: no login refusal"; c
 
 "$POOL" --pqch-miner "127.0.0.1:$STRATUM_PORT" "$B" --threads 2 --seconds "$SECONDS_TO_RUN" > "$DIR/miner.out" 2>&1 || {
 	echo "FAIL: the miner exited with an error"; tail -20 "$DIR/miner.out"; exit 1; }
+python3 - "$STRATUM_PORT" <<'PY'
+import socket, sys, time
+port = int(sys.argv[1])
+def conn():
+    s = socket.create_connection(("127.0.0.1", port), timeout=3)
+    return s
+def closed(s, wait=3.0):
+    s.settimeout(wait)
+    try:
+        return s.recv(100) == b""
+    except socket.timeout:
+        return False
+    except ConnectionResetError:
+        return True
+eight = [conn() for _ in range(8)]
+time.sleep(0.5)
+assert not any(closed(s, 0.2) for s in eight), "one of 8 connections from one address was closed"
+ninth = conn()
+assert closed(ninth), "a 9th connection from one address was accepted"
+for s in eight + [ninth]: s.close()
+time.sleep(1)  # let the node see them closed
+bad = conn()
+bad.sendall(b"this is not json\n")
+assert closed(bad), "garbage did not close the connection"
+time.sleep(0.5)
+again = conn()
+assert closed(again), "an address that sent garbage was not refused"
+print("stratum limits: 9th connection refused, address refused after garbage")
+PY
 wait "$POOL_PID" || { echo "FAIL: the pool exited with an error"; tail -20 "$DIR/pool.out"; exit 1; }
 
 grep "pqch-miner:" "$DIR/miner.out"

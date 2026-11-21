@@ -105,6 +105,11 @@ struct Pool : public P2PHandler, public StratumHandler
 	};
 	std::map<uint64_t, MinerSession> sessions;
 	static constexpr uint32_t MAX_BAD_SUBMITS = 10;
+	// Every submit costs one RandomX hash (light mode) on the loop thread: at most this many per second for all
+	// miners together. Shares come about every 10 s on the whole share chain; more is somebody hammering.
+	static constexpr uint32_t MAX_VERIFY_PER_SECOND = 10;
+	uint64_t verify_second = 0;
+	uint32_t verify_count = 0;
 
 	PqchdClient* client = nullptr;
 	P2P* p2p = nullptr;
@@ -196,6 +201,9 @@ struct Pool : public P2PHandler, public StratumHandler
 			if (it == sessions.end()) return "not logged in";
 			MinerSession& m = it->second;
 			if (!have_template || m.job_id.empty() || (job_id != m.job_id)) return "stale job";
+			const uint64_t now = seconds_since_epoch();
+			if (now != verify_second) { verify_second = now; verify_count = 0; }
+			if (++verify_count > MAX_VERIFY_PER_SECOND) return "node busy";
 			w = m.work;
 			make_header(w.tmpl, w.merkle_root, static_cast<uint32_t>(w.timestamp), nonce, header);
 			// never trust the miner's hash: recompute it

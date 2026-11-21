@@ -36,6 +36,7 @@
 
 #include "pqch_block.h"
 #include "uv_util.h"
+#include <map>
 
 namespace p2pool {
 namespace pqch {
@@ -74,6 +75,12 @@ public:
 	static constexpr uint32_t MAX_MESSAGES_PER_SECOND = 20;
 	static constexpr size_t MAX_SESSIONS = 256;
 	static constexpr uint64_t IDLE_SECONDS = 600;   // no message for this long (keepalived every 60 s): bye
+	// per remote address (the stratum can be public): connections at once, new connections per minute, time
+	// to log in, and how long an address that broke the protocol stays refused
+	static constexpr size_t MAX_SESSIONS_PER_IP = 8;
+	static constexpr uint32_t MAX_CONNECTIONS_PER_IP_PER_MINUTE = 20;
+	static constexpr uint64_t LOGIN_SECONDS = 30;
+	static constexpr uint64_t BAN_SECONDS = 600;
 
 	StratumServer(uv_loop_t* loop, const std::string& listen, StratumHandler* handler); // listen: "ip:port"
 	~StratumServer();
@@ -81,7 +88,7 @@ public:
 	bool start();
 	void stop();
 	void send_job(uint64_t session, const std::string& job_json); // loop thread
-	void disconnect(uint64_t session, const char* reason);         // loop thread
+	void disconnect(uint64_t session, const char* reason);         // loop thread; refuses its address for BAN_SECONDS
 	size_t session_count() const;
 
 	struct Session;
@@ -92,7 +99,8 @@ private:
 	bool handle_line(Session* s, const char* line, size_t size);
 	void reply(Session* s, const std::string& id, const std::string& result, const std::string& error);
 	void write(Session* s, const std::string& line);
-	void close_session(Session* s, const char* reason);
+	void close_session(Session* s, const char* reason, bool ban = false);
+	bool admit(const std::string& ip, const char*& reason);
 
 	uv_loop_t* m_loop;
 	std::string m_listen;
@@ -104,6 +112,8 @@ private:
 	bool m_stopped = false;
 	uint64_t m_nextSession = 1;
 	std::vector<Session*> m_sessions;
+	std::map<std::string, uint64_t> m_bans;                                  // ip -> refused until
+	std::map<std::string, std::pair<uint64_t, uint32_t>> m_connections;      // ip -> (minute, new connections)
 };
 
 } // namespace pqch

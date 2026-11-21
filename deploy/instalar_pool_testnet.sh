@@ -4,7 +4,7 @@
 # Instala um nó do pool PQCH (pqch-pool) na testnet, ao lado de um pqchd que já esteja a correr na mesma máquina.
 #
 #   sudo deploy/instalar_pool_testnet.sh --user <utilizador do pqchd> --datadir <pasta de dados do pqchd> \
-#        [--wallet <carteira> | --morada <pqct1p...>] [--threads N] [--fast] [--listen] [--peer <ip>:37890]... [--substituir-minerador] [--stratum-lan PORTA]
+#        [--wallet <carteira> | --morada <pqct1p...>] [--threads N] [--fast] [--listen] [--peer <ip>:37890]... [--substituir-minerador] [--stratum-lan PORTA | --stratum-publico PORTA]
 #
 #   âncora:  sudo deploy/instalar_pool_testnet.sh --user pqch --datadir /home/pqch/.pqch --threads 1 --listen
 #   server:  sudo deploy/instalar_pool_testnet.sh --user pqch-minerador --datadir /var/lib/pqch-minerador \
@@ -15,6 +15,9 @@
 #
 # Com --stratum-lan 37889: o nó serve também mineradores sem nó (pqch-pool --pqch-miner, fase C) na porta indicada;
 #   a firewall (se a ufw estiver ativa) só a abre às redes privadas (192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12).
+# Com --stratum-publico 37889: o mesmo, aberto a qualquer endereço (para a âncora). O nó limita cada endereço
+#   (8 ligações, 20 ligações novas por minuto, recusa durante 10 minutos quem não cumprir o protocolo) e verifica
+#   no máximo 10 partilhas por segundo.
 # Nó sem carteira (disablewallet=1): indique a morada das recompensas com --morada pqct1p...
 #
 # O que faz, por esta ordem:
@@ -34,7 +37,7 @@ set -euo pipefail
 
 POOL_PORT=37890
 RPC_PORT=39332          # testnet
-STRATUM_PORT=""; NODE_USER=""; DATADIR=""; WALLET=""; MORADA=""; THREADS=1; FAST=""; LISTEN=0; PEERS=(); SUBST=0
+STRATUM_PORT=""; STRATUM_PUBLIC=0; NODE_USER=""; DATADIR=""; WALLET=""; MORADA=""; THREADS=1; FAST=""; LISTEN=0; PEERS=(); SUBST=0
 while (( $# )); do
 	case "$1" in
 		--user) NODE_USER=$2; shift 2 ;;
@@ -47,6 +50,7 @@ while (( $# )); do
 		--peer) PEERS+=("$2"); shift 2 ;;
 		--substituir-minerador) SUBST=1; shift ;;
 		--stratum-lan) STRATUM_PORT=$2; shift 2 ;;
+		--stratum-publico) STRATUM_PORT=$2; STRATUM_PUBLIC=1; shift 2 ;;
 		*) echo "opção desconhecida: $1"; exit 1 ;;
 	esac
 done
@@ -156,7 +160,12 @@ else
 	echo "porta do pool: nada a abrir (este nó liga-se para fora)"
 fi
 if [[ -n "$STRATUM_PORT" ]]; then
-	if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+	if (( STRATUM_PUBLIC )); then
+		if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+			ufw allow "$STRATUM_PORT/tcp" comment 'pqch-pool stratum' >/dev/null
+		fi
+		echo "stratum: porta $STRATUM_PORT/tcp aberta a qualquer endereço (veja também a firewall do painel do fornecedor)"
+	elif command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
 		for net in 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12; do
 			ufw allow from $net to any port "$STRATUM_PORT" proto tcp comment 'pqch-pool stratum (LAN)' >/dev/null
 		done

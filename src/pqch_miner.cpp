@@ -212,7 +212,7 @@ struct Miner
 			++accepted;
 			LOGINFO(1, "share accepted by the pool (" << accepted << " accepted)");
 		}
-		else if (message == "stale job") {
+		else if ((message == "stale job") || (message == "node busy")) {
 			++stale;
 			LOGINFO(2, "share arrived after the work changed (stale)");
 		}

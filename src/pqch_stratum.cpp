@@ -136,6 +136,7 @@ struct StratumServer::Session
 	bool logged_in = false;
 	bool closing = false;
 	std::string rbuf;
+	uint64_t connected_at = 0;
 	uint64_t last_message = 0;
 	uint64_t window_start = 0;
 	uint32_t window_count = 0;
@@ -180,10 +181,18 @@ bool StratumServer::start()
 	uv_timer_start(&m_timer, [](uv_timer_t* t) {
 		StratumServer* self = static_cast<StratumServer*>(t->data);
 		const uint64_t now = seconds_since_epoch();
-		std::vector<Session*> idle;
-		for (Session* s : self->m_sessions) if (s->last_message + IDLE_SECONDS < now) idle.push_back(s);
+		std::vector<Session*> idle, no_login;
+		for (Session* s : self->m_sessions) {
+			if (s->last_message + IDLE_SECONDS < now) idle.push_back(s);
+			else if (!s->logged_in && (s->connected_at + LOGIN_SECONDS < now)) no_login.push_back(s);
+		}
 		for (Session* s : idle) self->close_session(s, "idle");
-	}, 60000, 60000);
+		for (Session* s : no_login) self->close_session(s, "no login");
+		for (auto it = self->m_bans.begin(); it != self->m_bans.end();) it = (it->second <= now) ? self->m_bans.erase(it) : std::next(it);
+		for (auto it = self->m_connections.begin(); it != self->m_connections.end();) {
+			it = (it->second.first + 1 < now / 60) ? self->m_connections.erase(it) : std::next(it);
+		}
+	}, 10000, 10000);
 	m_timerStarted = true;
 	LOGINFO(1, "stratum: listening for miners on " << m_listen);
 	return true;
@@ -218,12 +227,12 @@ void StratumServer::on_connection(uv_stream_t* server, int status)
 	Session* s = new Session();
 	s->owner = self;
 	s->id = self->m_nextSession++;
-	s->last_message = seconds_since_epoch();
+	s->connected_at = s->last_message = seconds_since_epoch();
 	uv_tcp_init(self->m_loop, &s->tcp);
 	s->tcp.data = s;
 	self->m_sessions.push_back(s);
-	if (uv_accept(server, reinterpret_cast<uv_stream_t*>(&s->tcp)) || (self->m_sessions.size() > MAX_SESSIONS)) {
-		self->close_session(s, "too many miners");
+	if (uv_accept(server, reinterpret_cast<uv_stream_t*>(&s->tcp))) {
+		self->close_session(s, nullptr);
 		return;
 	}
 	sockaddr_storage addr{};
@@ -233,6 +242,15 @@ void StratumServer::on_connection(uv_stream_t* server, int status)
 		if (addr.ss_family == AF_INET6) uv_ip6_name(reinterpret_cast<const sockaddr_in6*>(&addr), buf, sizeof(buf));
 		else uv_ip4_name(reinterpret_cast<const sockaddr_in*>(&addr), buf, sizeof(buf));
 		s->address = buf;
+		if (s->address.rfind("::ffff:", 0) == 0) s->address.erase(0, 7);
+	}
+	const char* reason = nullptr;
+	if (self->m_sessions.size() > MAX_SESSIONS) reason = "too many miners";
+	else self->admit(s->address, reason);
+	if (reason) {
+		LOGINFO(4, "stratum: refusing " << s->address << ": " << reason);
+		self->close_session(s, nullptr);
+		return;
 	}
 	uv_tcp_nodelay(&s->tcp, 1);
 	uv_read_start(reinterpret_cast<uv_stream_t*>(&s->tcp),
@@ -249,10 +267,27 @@ void StratumServer::on_connection(uv_stream_t* server, int status)
 	LOGINFO(4, "stratum: connection from " << s->address);
 }
 
-void StratumServer::close_session(Session* s, const char* reason)
+// A new connection from `ip`: refused while the address is banned, has MAX_SESSIONS_PER_IP connections already
+// or opened too many in the current minute.
+bool StratumServer::admit(const std::string& ip, const char*& reason)
+{
+	const uint64_t now = seconds_since_epoch();
+	auto ban = m_bans.find(ip);
+	if ((ban != m_bans.end()) && (ban->second > now)) { reason = "address refused for a while"; return false; }
+	auto& rate = m_connections[ip];
+	if (rate.first != now / 60) rate = { now / 60, 0 };
+	if (++rate.second > MAX_CONNECTIONS_PER_IP_PER_MINUTE) { reason = "too many connections per minute"; return false; }
+	size_t n = 0;
+	for (const Session* t : m_sessions) if (!t->closing && (t->address == ip)) ++n;
+	if (n > MAX_SESSIONS_PER_IP) { reason = "too many connections from this address"; return false; } // n includes the new one
+	return true;
+}
+
+void StratumServer::close_session(Session* s, const char* reason, bool ban)
 {
 	if (s->closing) return;
 	s->closing = true;
+	if (ban && !s->address.empty()) m_bans[s->address] = seconds_since_epoch() + BAN_SECONDS;
 	if (reason) LOGINFO(3, "stratum: closing miner " << s->address << ": " << reason);
 	m_sessions.erase(std::remove(m_sessions.begin(), m_sessions.end(), s), m_sessions.end());
 	if (s->logged_in) m_handler->on_disconnect(s->id);
@@ -287,7 +322,7 @@ void StratumServer::send_job(uint64_t session, const std::string& job_json)
 void StratumServer::disconnect(uint64_t session, const char* reason)
 {
 	auto it = std::find_if(m_sessions.begin(), m_sessions.end(), [session](const Session* s) { return s->id == session; });
-	if (it != m_sessions.end()) close_session(*it, reason);
+	if (it != m_sessions.end()) close_session(*it, reason, true);
 }
 
 void StratumServer::on_data(Session* s, const char* data, size_t size)
@@ -300,14 +335,14 @@ void StratumServer::on_data(Session* s, const char* data, size_t size)
 		if (nl == std::string::npos) break;
 		const uint64_t now = seconds_since_epoch();
 		if (now != s->window_start) { s->window_start = now; s->window_count = 0; }
-		if (++s->window_count > MAX_MESSAGES_PER_SECOND) { close_session(s, "too many messages"); return; }
+		if (++s->window_count > MAX_MESSAGES_PER_SECOND) { close_session(s, "too many messages", true); return; }
 		s->last_message = now;
-		if ((nl > pos) && !handle_line(s, s->rbuf.data() + pos, nl - pos)) { close_session(s, "invalid message"); return; }
+		if ((nl > pos) && !handle_line(s, s->rbuf.data() + pos, nl - pos)) { close_session(s, "invalid message", true); return; }
 		if (s->closing) return;
 		pos = nl + 1;
 	}
 	s->rbuf.erase(0, pos);
-	if (s->rbuf.size() > MAX_LINE) close_session(s, "line too long");
+	if (s->rbuf.size() > MAX_LINE) close_session(s, "line too long", true);
 }
 
 bool StratumServer::handle_line(Session* s, const char* line, size_t size)
