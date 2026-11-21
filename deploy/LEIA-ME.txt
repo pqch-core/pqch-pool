@@ -1,0 +1,17 @@
+pqch-pool: nó do pool descentralizado da PQCH e minerador (derivado do P2Pool, licença GPL-3.0, ver COPYING).
+Código-fonte: https://github.com/pqch-core/pqch-pool
+
+Normalmente não precisa de usar este programa diretamente: a carteira PQCH (pqch-qt) arranca-o na página
+"Mineração" > "Minerar no pool". Para o usar à mão:
+
+  Minerar num nó do pool (sem nó próprio), com os prémios pagos à sua morada por PPLNS:
+    pqch-pool --pqch-miner <ip do nó>:37889 <a sua morada pqc1p... ou pqct1p...> --threads 2
+    (--fast: modo rápido do RandomX, cerca de 2,1 GB de memória e várias vezes mais rápido)
+
+  Nó do pool (com um pqchd), ver PQCH.md no código-fonte.
+
+Confirme sempre os ficheiros com o SHA256SUMS e a assinatura SHA256SUMS.asc da chave de releases da PQCH
+(impressão digital 1CDF A6A8 4A35 AA6D 7B52 4D1C FB6E 21DF 0D38 B5DA).
+
+pqch-pool: the PQCH decentralised pool node and miner (derived from P2Pool, GPL-3.0, see COPYING).
+Mine on a pool node: pqch-pool --pqch-miner <node ip>:37889 <your address> --threads 2 [--fast]

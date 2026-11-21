@@ -1,0 +1,175 @@
+# pqch-pool release: Linux (static libraries) and Windows binaries, SHA256SUMS, and a draft release.
+#
+# Run by hand (Actions > pqch-pool release > Run workflow) with the version (e.g. 0.1.0). With "release"
+# ticked it creates the draft release v<version> on this commit; Cesar checks the sums, signs SHA256SUMS with
+# the PQCH release key (pen D:) and publishes it, as for pqch (contrib/pqch/RELEASE.md in pqch-core/pqch).
+# The PQCH wallet's release then takes these binaries by version and SHA256 (contrib/pqch/pqch-pool.sha256).
+name: pqch-pool release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 0.1.0)'
+        required: true
+      release:
+        description: 'Create the draft release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Build x86_64-linux-gnu (static libraries)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Version
+        run: |
+          [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must be like 0.1.0"; exit 1; }
+      - name: Submodules (no gRPC; BoringSSL only, for TLS)
+        run: |
+          git submodule update --init --depth 1 external/src/RandomX external/src/cppzmq external/src/libuv \
+            external/src/libzmq external/src/rapidjson external/src/robin-hood-hashing external/src/curl \
+            external/src/miniupnp tests/googletest
+          git submodule update --init --depth 1 external/src/grpc
+          git -C external/src/grpc submodule update --init --depth 1 third_party/boringssl-with-bazel
+      - name: Packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake nasm xz-utils
+      - name: libcurl, libuv, libzmq (static, from the submodules)
+        run: |
+          F="-Os -ffunction-sections"
+          (cd external/src/curl && cmake . -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="$F" -DCURL_DROP_UNUSED=ON \
+            -DCURL_DISABLE_TYPECHECK=ON -DPICKY_COMPILER=OFF -DBUILD_CURL_EXE=OFF -DBUILD_SHARED_LIBS=OFF \
+            -DCURL_DISABLE_INSTALL=ON -DBUILD_LIBCURL_DOCS=OFF -DBUILD_MISC_DOCS=OFF -DENABLE_CURL_MANUAL=OFF \
+            -DCURL_ZLIB=OFF -DCURL_BROTLI=OFF -DCURL_ZSTD=OFF -DHTTP_ONLY=ON -DCURL_ENABLE_SSL=OFF -DUSE_LIBIDN2=OFF \
+            -DCURL_USE_LIBPSL=OFF -DCURL_USE_LIBSSH2=OFF -DBUILD_TESTING=OFF -DUSE_NGHTTP2=OFF -DBUILD_EXAMPLES=OFF \
+            -DP2POOL_BORINGSSL=ON -DOPENSSL_INCLUDE_DIR=../grpc/third_party/boringssl-with-bazel/include && make -j"$(nproc)")
+          (mkdir -p external/src/libuv/build && cd external/src/libuv/build && cmake .. -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="$F" -DBUILD_TESTING=OFF -DLIBUV_BUILD_SHARED=OFF && make -j"$(nproc)")
+          (mkdir -p external/src/libzmq/build && cd external/src/libzmq/build && cmake .. -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="$F" -DCMAKE_CXX_FLAGS="$F" -DWITH_LIBSODIUM=OFF -DWITH_LIBBSD=OFF -DBUILD_TESTS=OFF \
+            -DWITH_DOCS=OFF -DENABLE_DRAFTS=OFF -DBUILD_SHARED=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && make -j"$(nproc)")
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DSTATIC_LIBS=ON -DWITH_GRPC=OFF -DWITH_MERGE_MINING_DONATION=OFF \
+            -DWITH_UPNP=OFF -DCMAKE_C_FLAGS="-Wl,-s -Wl,--gc-sections" -DCMAKE_CXX_FLAGS="-Wl,-s -Wl,--gc-sections" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build build -j"$(nproc)" --target p2pool
+          ldd build/p2pool || true
+      - name: Tests
+        run: |
+          cd tests
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DSTATIC_LIBS=ON -DWITH_GRPC=OFF -DWITH_UPNP=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build build -j"$(nproc)" --target p2pool_tests
+          cd build && ./p2pool_tests --gtest_filter='pqch*'
+      - name: Package
+        run: |
+          N="pqch-pool-${{ inputs.version }}"
+          mkdir -p "stage/$N" out
+          install -m 755 build/p2pool "stage/$N/pqch-pool"
+          cp COPYING "stage/$N/COPYING"
+          cp deploy/LEIA-ME.txt "stage/$N/LEIA-ME.txt"
+          tar -C stage --owner=0 --group=0 --numeric-owner --sort=name --mtime="@$(git log -1 --format=%ct)" \
+            -czf "out/$N-x86_64-linux-gnu.tar.gz" "$N"
+          tar -tzvf "out/$N-x86_64-linux-gnu.tar.gz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pqch-pool-linux
+          path: out/*
+          if-no-files-found: error
+
+  windows:
+    name: Build win64 (MSVC)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Submodules (no gRPC; BoringSSL only, for TLS)
+        shell: bash
+        run: |
+          git submodule update --init --depth 1 external/src/RandomX external/src/cppzmq external/src/libuv \
+            external/src/libzmq external/src/rapidjson external/src/robin-hood-hashing external/src/curl \
+            external/src/miniupnp tests/googletest
+          git submodule update --init --depth 1 external/src/grpc
+          git -C external/src/grpc submodule update --init --depth 1 third_party/boringssl-with-bazel
+      - name: Build
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -DCMAKE_SYSTEM_VERSION="10.0" -DWITH_GRPC=OFF -DWITH_UPNP=OFF `
+            -DWITH_MERGE_MINING_DONATION=OFF -DOPENSSL_NO_ASM=ON -DCMAKE_POLICY_VERSION_MINIMUM="3.5"
+          cmake --build build --config Release --target p2pool -- /m /v:m
+      - name: Tests
+        run: |
+          cmake -S tests -B tests/build -G "Visual Studio 17 2022" -DCMAKE_SYSTEM_VERSION="10.0" -DWITH_GRPC=OFF `
+            -DWITH_UPNP=OFF -DCMAKE_POLICY_VERSION_MINIMUM="3.5"
+          cmake --build tests/build --config Release --target p2pool_tests -- /m /v:m
+          cd tests/build/Release
+          ./p2pool_tests.exe --gtest_filter='pqch*'
+      - name: Miner smoke test (help and refused pool)
+        shell: bash
+        run: |
+          build/Release/p2pool.exe --help | grep -q -- "--pqch-miner"
+          # nothing listens on this port: the miner must keep retrying, not crash, and stop when told
+          build/Release/p2pool.exe --pqch-miner 127.0.0.1:9 pqct1pjmsknlc73kmcqw87nadat9xhvpwgu48x3pagweqqa8ffl3ssc7gq06rc6z --seconds 12 | tee miner.out
+          grep -q "cannot connect to the pool" miner.out
+      - name: Package
+        shell: bash
+        run: |
+          N="pqch-pool-${{ inputs.version }}"
+          mkdir -p "stage/$N" out
+          cp build/Release/p2pool.exe "stage/$N/pqch-pool.exe"
+          cp COPYING "stage/$N/COPYING.txt"
+          cp deploy/LEIA-ME.txt "stage/$N/LEIA-ME.txt"
+          (cd stage && 7z a -tzip "../out/$N-win64.zip" "$N")
+          7z l "out/$N-win64.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pqch-pool-windows
+          path: out/*
+          if-no-files-found: error
+
+  sums:
+    name: SHA256SUMS and draft release
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write  # the draft release
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          path: dl
+          pattern: pqch-pool-*
+          merge-multiple: true
+      - name: SHA256SUMS
+        run: |
+          cd dl
+          sha256sum pqch-pool-* | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pqch-pool-release-${{ inputs.version }}-${{ github.run_number }}
+          path: dl/*
+      - name: Draft release
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ inputs.version }}"
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::release ${TAG} already exists"; exit 1
+          fi
+          cat > notes.md <<EOF
+          pqch-pool ${{ inputs.version }}: the PQCH decentralised pool node and miner (fork of P2Pool, GPL-3.0).
+
+          Check the files with SHA256SUMS and SHA256SUMS.asc (PQCH release key, fingerprint
+          1CDF A6A8 4A35 AA6D 7B52 4D1C FB6E 21DF 0D38 B5DA). Source: this repository at ${GITHUB_SHA::7}.
+          EOF
+          gh release create "${TAG}" dl/* --repo "${GITHUB_REPOSITORY}" --draft --target "${GITHUB_SHA}" \
+            --title "pqch-pool ${TAG}" --notes-file notes.md
