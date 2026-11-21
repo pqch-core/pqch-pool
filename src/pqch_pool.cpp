@@ -96,13 +96,23 @@ struct Pool : public P2PHandler, public StratumHandler
 	uint64_t started_at = 0;
 	uint64_t first_peer_at = 0;
 	uint64_t last_sync_progress = 0;
+	uint64_t best_seen_height = 0;                    // highest share height received from another node
+	static constexpr uint64_t SYNC_BEHIND_SHARES = 2;
 	bool was_syncing = false;
 	uv_timer_t sync_timer{};
 
 	bool syncing() const
 	{
 		const uint64_t now = seconds_since_epoch();
-		if (pending_count && (now < last_sync_progress + SYNC_STALL_SECONDS)) return true;
+		// Behind: some node announced a share well above this node's tip and the gap is being filled. (Not
+		// "pending is not empty": a share whose parent never comes, e.g. on an abandoned branch, would keep it
+		// non-empty while new shares keep making progress, and the node would wait forever.)
+		const Share* tip = chain.tip();
+		const uint64_t tip_height = tip ? tip->height : 0;
+		if (pending_count && (best_seen_height > tip_height + SYNC_BEHIND_SHARES || !tip) &&
+			(now < last_sync_progress + SYNC_STALL_SECONDS)) {
+			return true;
+		}
 		if (!wait_for_peers || chain.size() || (now >= started_at + SYNC_START_SECONDS)) return false;
 		return !first_peer_at || (now < first_peer_at + SYNC_PEER_SECONDS); // empty chain: wait for a peer's tip
 	}
@@ -400,6 +410,7 @@ struct Pool : public P2PHandler, public StratumHandler
 		{
 			Guard g(lock);
 			if (chain.contains(s.id)) return true;
+			if (!history) best_seen_height = std::max(best_seen_height, s.height);
 
 			const Share* tip = chain.tip();
 			const uint64_t keep = chain.params().pplns_window + chain.params().difficulty_window;
